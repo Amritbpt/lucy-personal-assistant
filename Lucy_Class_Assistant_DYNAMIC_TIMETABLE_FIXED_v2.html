@@ -1,0 +1,2086 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1" />
+<title>Lucy — Your Class Assistant</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🏫</text></svg>" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@6/dist/tesseract.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { margin: 0; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+window.addEventListener("error", function (event) {
+  if (event && event.error) {
+    const root = document.getElementById("root");
+    if (root && !root.innerHTML.trim()) {
+      root.innerHTML = '<div style="font-family:system-ui;padding:24px;max-width:760px;margin:40px auto;color:#334155"><h2 style="margin-bottom:8px">Lucy could not start</h2><p style="margin-bottom:8px">The app encountered a JavaScript error while loading.</p><pre style="white-space:pre-wrap;background:#f1f5f9;padding:12px;border-radius:8px">' + String(event.error.message || event.message || "Unknown error") + '</pre><p>Please use the latest HTML file and open it in Chrome/Edge with internet access enabled.</p></div>';
+    }
+  }
+});
+</script>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef } = React;
+const Papa = window.Papa;
+
+// ---- Storage shim (localStorage-backed, mimics the async storage API) ----
+const storage = {
+  async get(key) {
+    const v = localStorage.getItem(key);
+    if (v === null) throw new Error("not found");
+    return { key, value: v };
+  },
+  async set(key, value) {
+    localStorage.setItem(key, value);
+    return { key, value };
+  },
+};
+
+// ---- Icon shims (emoji-based, no external icon library needed) ----
+function Icon({ children, size = 16, className = "" }) {
+  return (
+    <span className={className} style={{ fontSize: size, lineHeight: 1, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+      {children}
+    </span>
+  );
+}
+const Bell = (p) => <Icon {...p}>🔔</Icon>;
+const BookOpen = (p) => <Icon {...p}>📖</Icon>;
+const Calendar = (p) => <Icon {...p}>📅</Icon>;
+const MessageCircle = (p) => <Icon {...p}>💬</Icon>;
+const Plus = (p) => <Icon {...p}>➕</Icon>;
+const Trash2 = (p) => <Icon {...p}>🗑️</Icon>;
+const Upload = (p) => <Icon {...p}>⬆️</Icon>;
+const Clock = (p) => <Icon {...p}>⏰</Icon>;
+const GraduationCap = (p) => <Icon {...p}>🎓</Icon>;
+const Send = (p) => <Icon {...p}>📨</Icon>;
+const School = (p) => <Icon {...p}>🏫</Icon>;
+const BellRing = (p) => <Icon {...p}>🔔</Icon>;
+const BellOff = (p) => <Icon {...p}>🔕</Icon>;
+const ScanLine = (p) => <Icon {...p}>🔍</Icon>;
+const Loader2 = (p) => <Icon {...p} className={(p.className || "") + " animate-spin"}>⏳</Icon>;
+const X = (p) => <Icon {...p}>✕</Icon>;
+
+
+const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+function genId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+}
+function timeToMinutes(t) {
+  if (!t) return null;
+  const [h, m] = t.split(":").map(Number);
+  return h * 60 + m;
+}
+function formatTime12(t) {
+  if (!t) return "TBA";
+  const [h, m] = t.split(":").map(Number);
+  const period = h >= 12 ? "PM" : "AM";
+  const hr = h % 12 === 0 ? 12 : h % 12;
+  return `${hr}:${String(m).padStart(2, "0")} ${period}`;
+}
+function todayStr() {
+  return new Date().toISOString().slice(0, 10);
+}
+function formatDateReadable(d) {
+  if (!d) return "TBA";
+  const date = new Date(d + "T00:00:00");
+  return date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+}
+function todayName() {
+  return DAYS[new Date().getDay()];
+}
+function getNextClass(timetable, now) {
+  const nowMinutes = now.getHours() * 60 + now.getMinutes();
+  const todayIdx = now.getDay();
+  for (let offset = 0; offset < 7; offset++) {
+    const idx = (todayIdx + offset) % 7;
+    const dayName = DAYS[idx];
+    let entries = timetable.filter((e) => e.day === dayName);
+    if (offset === 0) entries = entries.filter((e) => timeToMinutes(e.start) >= nowMinutes);
+    entries = entries.filter((e) => e.start);
+    entries.sort((a, b) => timeToMinutes(a.start) - timeToMinutes(b.start));
+    if (entries.length > 0) return { entry: entries[0], daysAway: offset };
+  }
+  return null;
+}
+
+function normalizeDay(d) {
+  if (!d) return null;
+  const s = String(d).trim().toLowerCase();
+  return DAYS.find((day) => day.toLowerCase().startsWith(s.slice(0, 3))) || null;
+}
+function parseJsonArray(text) {
+  const cleaned = text.trim();
+
+  // Strategy 1: the whole response is already valid JSON
+  try {
+    const direct = JSON.parse(cleaned);
+    if (Array.isArray(direct)) return direct;
+  } catch (e) {}
+
+  // Strategy 2: strip ```json ... ``` or ``` ... ``` code fences
+  const fenced = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced) {
+    try {
+      const parsed = JSON.parse(fenced[1].trim());
+      if (Array.isArray(parsed)) return parsed;
+    } catch (e) {}
+  }
+
+  // Strategy 3: find the first well-formed [...] block by matching bracket depth
+  const firstBracket = cleaned.indexOf("[");
+  if (firstBracket !== -1) {
+    let depth = 0;
+    for (let i = firstBracket; i < cleaned.length; i++) {
+      if (cleaned[i] === "[") depth++;
+      else if (cleaned[i] === "]") {
+        depth--;
+        if (depth === 0) {
+          const candidate = cleaned.slice(firstBracket, i + 1);
+          try {
+            const parsed = JSON.parse(candidate);
+            if (Array.isArray(parsed)) return parsed;
+          } catch (e) {}
+          break;
+        }
+      }
+    }
+  }
+
+  // Strategy 4: salvage whatever complete {...} objects exist, even if the
+  // overall array got cut off (e.g. a long timetable hitting the token limit)
+  const salvaged = [];
+  let depth = 0;
+  let objStart = -1;
+  for (let i = 0; i < cleaned.length; i++) {
+    const ch = cleaned[i];
+    if (ch === "{") {
+      if (depth === 0) objStart = i;
+      depth++;
+    } else if (ch === "}") {
+      depth--;
+      if (depth === 0 && objStart !== -1) {
+        try {
+          salvaged.push(JSON.parse(cleaned.slice(objStart, i + 1)));
+        } catch (e) {}
+        objStart = -1;
+      }
+    }
+  }
+  if (salvaged.length > 0) return salvaged;
+
+  // All strategies failed — surface exactly what came back so the real cause is visible
+  const snippet = cleaned.slice(0, 220);
+  throw new Error(`The image reader didn't return usable data. It said: "${snippet}${cleaned.length > 220 ? "..." : ""}"`);
+}
+function readImageElement(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error("Could not load the image."));
+      img.src = reader.result;
+    };
+    reader.onerror = () => reject(new Error("Could not read the image."));
+    reader.readAsDataURL(file);
+  });
+}
+
+function canvasToImageData(canvas, quality = 0.94) {
+  const dataUrl = canvas.toDataURL("image/jpeg", quality);
+  return {
+    base64: dataUrl.slice(dataUrl.indexOf(",") + 1),
+    mediaType: "image/jpeg",
+  };
+}
+
+function drawScaled(img, maxDimension = 2400, rotate = false) {
+  const scale = Math.min(1, maxDimension / Math.max(img.width, img.height));
+  const w = Math.max(1, Math.round(img.width * scale));
+  const h = Math.max(1, Math.round(img.height * scale));
+
+  const canvas = document.createElement("canvas");
+
+  if (rotate) {
+    canvas.width = h;
+    canvas.height = w;
+  } else {
+    canvas.width = w;
+    canvas.height = h;
+  }
+
+  const ctx = canvas.getContext("2d", { alpha: false });
+  ctx.fillStyle = "white";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  if (rotate) {
+    // Clockwise 90° rotation. This turns the uploaded timetable
+    // into the readable landscape grid shown in the user's image.
+    ctx.translate(canvas.width, 0);
+    ctx.rotate(Math.PI / 2);
+  }
+
+  ctx.drawImage(img, 0, 0, w, h);
+  return canvasToImageData(canvas);
+}
+
+async function prepareImagesForVision(file) {
+  if (file.size > 12 * 1024 * 1024) {
+    throw new Error("That image is larger than 12MB — try a smaller photo or screenshot.");
+  }
+
+  if (!file.type || !["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
+    throw new Error("Please upload a JPG, PNG, or WebP image.");
+  }
+
+  const img = await readImageElement(file);
+
+  // Always send the original plus a normalized clockwise-rotated view.
+  // The vision model can choose the view that makes the grid easiest to read.
+  const original = drawScaled(img, 2400, false);
+  const rotated = drawScaled(img, 2400, true);
+
+  return [original, rotated];
+}
+
+
+// ============================================================
+// LOCAL TIMETABLE OCR — NO API KEY REQUIRED
+// ============================================================
+
+const TIMETABLE_SLOTS = [
+  ["09:00", "09:50"],
+  ["09:50", "10:40"],
+  ["10:45", "11:35"],
+  ["11:35", "12:25"],
+  ["12:25", "13:15"],
+  ["13:15", "14:05"],
+  ["14:05", "14:55"],
+  ["15:00", "15:50"],
+  ["15:50", "16:40"],
+  ["16:40", "17:30"],
+];
+
+function loadImageFromFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error("Could not open the timetable image."));
+      img.src = reader.result;
+    };
+    reader.onerror = () => reject(new Error("Could not read the timetable image."));
+    reader.readAsDataURL(file);
+  });
+}
+
+function makeTimetableCanvas(img) {
+  const shouldRotate = img.height > img.width * 1.10;
+  const canvas = document.createElement("canvas");
+
+  if (shouldRotate) {
+    canvas.width = img.height;
+    canvas.height = img.width;
+    const ctx = canvas.getContext("2d");
+    ctx.translate(canvas.width, 0);
+    ctx.rotate(Math.PI / 2);
+    ctx.drawImage(img, 0, 0, img.width, img.height);
+  } else {
+    canvas.width = img.width;
+    canvas.height = img.height;
+    canvas.getContext("2d").drawImage(img, 0, 0);
+  }
+
+  return canvas;
+}
+
+function clusterNumbers(values, gap = 4) {
+  const groups = [];
+
+  for (const value of values) {
+    if (
+      !groups.length ||
+      value - groups[groups.length - 1][groups[groups.length - 1].length - 1] > gap
+    ) {
+      groups.push([value]);
+    } else {
+      groups[groups.length - 1].push(value);
+    }
+  }
+
+  return groups.map(group => ({
+    start: group[0],
+    end: group[group.length - 1],
+    center: Math.round(group.reduce((a, b) => a + b, 0) / group.length)
+  }));
+}
+
+function getGrayPixels(canvas) {
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const gray = new Uint8Array(canvas.width * canvas.height);
+
+  for (let i = 0, p = 0; i < image.data.length; i += 4, p++) {
+    gray[p] =
+      0.299 * image.data[i] +
+      0.587 * image.data[i + 1] +
+      0.114 * image.data[i + 2];
+  }
+
+  return { gray, width: canvas.width, height: canvas.height };
+}
+
+function rowDarkFractions(gray, width, height, x1, x2) {
+  const result = new Float32Array(height);
+  const left = Math.max(0, Math.floor(x1));
+  const right = Math.min(width, Math.ceil(x2));
+  const total = Math.max(1, right - left);
+
+  for (let y = 0; y < height; y++) {
+    let dark = 0;
+    for (let x = left; x < right; x++) {
+      if (gray[y * width + x] < 200) dark++;
+    }
+    result[y] = dark / total;
+  }
+
+  return result;
+}
+
+function columnDarkFractions(gray, width, height, y1, y2) {
+  const result = new Float32Array(width);
+  const top = Math.max(0, Math.floor(y1));
+  const bottom = Math.min(height, Math.ceil(y2));
+  const total = Math.max(1, bottom - top);
+
+  for (let x = 0; x < width; x++) {
+    let dark = 0;
+    for (let y = top; y < bottom; y++) {
+      if (gray[y * width + x] < 200) dark++;
+    }
+    result[x] = dark / total;
+  }
+
+  return result;
+}
+
+function detectTimetableGrid(canvas) {
+  const { gray, width, height } = getGrayPixels(canvas);
+
+  const xSearch1 = Math.floor(width * 0.08);
+  // Ignore the outer image/page border. The timetable itself ends well
+  // before the extreme right edge on the supplied timetable format.
+  const xSearch2 = Math.floor(width * 0.93);
+  const ySearch1 = Math.floor(height * 0.02);
+  const ySearch2 = Math.floor(height * 0.98);
+
+  // ------------------------------------------------------------
+  // Horizontal lines: these are stable across the five day rows.
+  // ------------------------------------------------------------
+  const horizontal = rowDarkFractions(
+    gray,
+    width,
+    height,
+    xSearch1,
+    xSearch2
+  );
+
+  const horizontalCandidates = [];
+  for (let y = ySearch1; y < ySearch2; y++) {
+    if (horizontal[y] > 0.52) horizontalCandidates.push(y);
+  }
+
+  let yLines = clusterNumbers(horizontalCandidates, 4)
+    .filter(c => c.end - c.start <= 10)
+    .map(c => c.center);
+
+  if (yLines.length < 7) {
+    throw new Error(
+      "I couldn't detect the timetable rows. Upload the complete timetable image."
+    );
+  }
+
+  // The timetable we support has:
+  // top border + header bottom + 5 day rows + footer/top border.
+  // Keep the first 8 actual horizontal boundaries.
+  if (yLines.length > 8) yLines = yLines.slice(0, 8);
+
+  // ------------------------------------------------------------
+  // Vertical lines: use the HEADER, not the body.
+  // The body contains merged cells, so detecting vertical lines there
+  // is unreliable. A threshold of 0.50 catches the double/dark header
+  // borders while avoiding most text.
+  // ------------------------------------------------------------
+  const vertical = columnDarkFractions(
+    gray,
+    width,
+    height,
+    yLines[0] + 3,
+    yLines[1] - 3
+  );
+
+  const verticalCandidates = [];
+  for (let x = xSearch1; x < xSearch2; x++) {
+    if (vertical[x] > 0.50) verticalCandidates.push(x);
+  }
+
+  const verticalGroups = clusterNumbers(verticalCandidates, 4)
+    .filter(c => c.end - c.start <= 12);
+
+  // Pick the representative pixel closest to the darkest part of each
+  // line. This is more accurate than averaging a double border.
+  let xLines = verticalGroups.map(group => {
+    let bestX = group.center;
+    let bestScore = -1;
+
+    for (let x = group.start; x <= group.end; x++) {
+      const score = vertical[x] || 0;
+      if (score > bestScore) {
+        bestScore = score;
+        bestX = x;
+      }
+    }
+
+    return bestX;
+  });
+
+  // Remove anything suspiciously close to the page edge.
+  xLines = xLines.filter(x => x > width * 0.10 && x < width * 0.93);
+
+  // Timetables can have different numbers of periods. Find the narrow day
+  // column and keep the full sequence of header boundaries after it.
+  let dayStart = -1;
+  for (let i = 0; i < xLines.length - 1; i++) {
+    const dayColumnWidth = xLines[i + 1] - xLines[i];
+    if (dayColumnWidth >= width * 0.012 && dayColumnWidth <= width * 0.10) {
+      dayStart = i;
+      break;
+    }
+  }
+
+  if (dayStart >= 0) xLines = xLines.slice(dayStart);
+
+  // Two boundaries for the day column plus at least two time columns.
+  if (xLines.length < 4) {
+    throw new Error(
+      "I detected the timetable rows but could not reliably detect the time columns. Use a clear, complete timetable image."
+    );
+  }
+
+  return { xLines, yLines, gray, width, height };
+}
+
+function cropCanvas(source, x1, y1, x2, y2, scale = 2.5) {
+  const pad = 4;
+
+  const sx = Math.max(0, Math.floor(x1 + pad));
+  const sy = Math.max(0, Math.floor(y1 + pad));
+  const ex = Math.min(source.width, Math.ceil(x2 - pad));
+  const ey = Math.min(source.height, Math.ceil(y2 - pad));
+
+  const w = Math.max(20, ex - sx);
+  const h = Math.max(20, ey - sy);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(w * scale);
+  canvas.height = Math.round(h * scale);
+
+  const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(source, sx, sy, w, h, 0, 0, canvas.width, canvas.height);
+
+  return canvas;
+}
+
+function cleanOcrText(text) {
+  return String(text || "")
+    .replace(/\r/g, "")
+    .replace(/[ \t]+/g, " ")
+    .replace(/[|¦]/g, " ")
+    .replace(/[‐‑‒–—]/g, "-")
+    .replace(/\n{2,}/g, "\n")
+    .trim();
+}
+
+function normalizeRoomText(room) {
+  let value = String(room || "")
+    .replace(/[|¦]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  // Fix common OCR mistakes in room labels before extracting the number.
+  value = value
+    .replace(/\bLAB\s*[-:]?\s*/gi, "LAB ")
+    .replace(/\b([A-Z]{1,3})\s*[=:]\s*/gi, "$1-")
+    .replace(/\b([A-Z]{1,3})\s+(\d{3,4})\b/gi, "$1-$2")
+    .replace(/\b([A-Z]{1,3})[- ]?(\d{2})[\]\}]\b/gi, "$1-$21")
+    .replace(/\b([A-Z]{1,3})[- ]?(\d{3,4})\b/gi, "$1-$2");
+
+  return value.trim();
+}
+
+function extractRooms(text) {
+  const source = String(text || "")
+    .replace(/[|¦]/g, " ")
+    .replace(/[\]}\)]/g, " ")
+    .replace(/\s+/g, " ");
+
+  const rooms = [];
+
+  // Handles C-309, C309, LAB C-202, Lab D-214 and common OCR variants
+  // such as C=309, C-20), C 309.
+  const re = /\b(LAB\s*)?([A-Z]{1,3})\s*[-=:]?\s*([0-9OI]{2,4})\b/gi;
+  let match;
+  while ((match = re.exec(source)) !== null) {
+    let number = String(match[3] || "")
+      .replace(/O/g, "0")
+      .replace(/I/g, "1");
+
+    // Timetable rooms are normally 3 digits. Ignore accidental numbers
+    // such as years or times.
+    if (number.length < 3 || number.length > 4) continue;
+    const prefix = String(match[2] || "").toUpperCase();
+    const isLab = !!match[1];
+    const room = `${isLab ? "LAB " : ""}${prefix}-${number}`;
+    if (!rooms.includes(room)) rooms.push(room);
+  }
+
+  return rooms;
+}
+
+function isTeacherStart(line) {
+  return /^(?:Dr|Mr|Ms|Mrs)\.?\s+/i.test(String(line || "").trim());
+}
+
+function cleanOcrLine(line) {
+  return String(line || "")
+    .replace(/[|¦]/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/[‐‑‒–—]/g, "-")
+    .trim();
+}
+
+function normalizeTeacherText(text) {
+  let value = cleanOcrLine(text)
+    .replace(/\bDr\s*\.?\s*/gi, "Dr. ")
+    .replace(/\bMr\s*\.?\s*/gi, "Mr. ")
+    .replace(/\bMs\s*\.?\s*/gi, "Ms. ")
+    .replace(/\bMrs\s*\.?\s*/gi, "Mrs. ")
+    .replace(/\s+,/g, ",")
+    .replace(/,{2,}/g, ",")
+    .trim();
+
+  return value;
+}
+
+function extractTeachers(text) {
+  // First split a line whenever a second title appears. OCR commonly gives
+  // "Ms. Ritu Rani, Mr. Dhirendra Kumar" as one line.
+  const expanded = String(text || "")
+    .replace(/\s+(?=(?:Dr|Mr|Ms|Mrs)\.?\s+)/gi, "\n")
+    .replace(/\r/g, "")
+    .split("\n")
+    .map(cleanOcrLine)
+    .filter(Boolean);
+
+  const teachers = [];
+
+  for (const raw of expanded) {
+    const line = raw
+      .replace(/\b(?:LAB\s+)?[A-Z]{1,3}\s*[-=:]?\s*[0-9OI]{2,4}\b/gi, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    const matches = line.match(/\b(?:Dr|Mr|Ms|Mrs)\.?\s+[A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){0,5}/gi);
+    if (matches) {
+      for (const m of matches) {
+        const value = normalizeTeacherText(m).replace(/[,;]+$/, "").trim();
+        if (value.length > 3) teachers.push(value);
+      }
+    }
+
+    if (/^AEP\s*[- ]?Trainer$/i.test(line)) teachers.push("AEP-Trainer");
+  }
+
+  return [...new Set(teachers)];
+}
+
+function extractSubjectFromLines(text) {
+  const lines = normalizeGroupMarkers(text)
+    .replace(/\r/g, "")
+    .split("\n")
+    .map(cleanOcrLine)
+    .filter(Boolean);
+
+  const subjectParts = [];
+  let beforeTeacher = true;
+
+  for (const line of lines) {
+    if (!beforeTeacher) continue;
+
+    if (/^(?:Dr|Mr|Ms|Mrs)\.?\s+/i.test(line)) {
+      beforeTeacher = false;
+      continue;
+    }
+
+    if (/^AEP\s*[- ]?Trainer$/i.test(line)) {
+      beforeTeacher = false;
+      continue;
+    }
+
+    if (/^(?:LAB\s+)?[A-Z]{1,3}\s*[-:]?\s*[0-9OI]{3,4}[\]}]?$/i.test(line)) {
+      continue;
+    }
+
+    if (/^3[- ]?Sec[- ]?A(?:\/G[12])?$/i.test(line) || /^G[12]$/i.test(line)) {
+      continue;
+    }
+
+    if (/^[-x]+$/i.test(line)) continue;
+
+    subjectParts.push(line);
+  }
+
+  let subject = subjectParts.join(" ");
+
+  // Remove section identifiers that OCR sometimes places on the same line.
+  subject = subject
+    .replace(/\b3[- ]?Sec[- ]?A\s*\/\s*G[12]\b/gi, " ")
+    .replace(/\b3[- ]?Sec[- ]?A\b/gi, " ")
+    .replace(/\bG[12]\b/gi, " ")
+    .replace(/\b(?:LAB\s+)?[A-Z]{1,3}\s*[-:]?\s*[0-9OI]{3,4}[\]}]?\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .replace(/^[-:;,\.\s]+|[-:;,\.\s]+$/g, "")
+    .trim();
+
+  return subject;
+}
+
+function cleanSubjectText(text) {
+  let subject = normalizeGroupMarkers(text)
+    .replace(/\s+/g, " ")
+    .trim();
+
+  subject = subject
+    .replace(/\b3[- ]?Sec[- ]?A\s*\/\s*G[12]\b/gi, " ")
+    .replace(/\b3[- ]?Sec[- ]?A\b/gi, " ")
+    .replace(/\bG[12]\b/gi, " ")
+    .replace(/\b(?:LAB\s+)?[A-Z]{1,3}\s*[-=:]?\s*[0-9OI]{3,4}\b/gi, " ")
+    .replace(/\b(?:Dr|Mr|Ms|Mrs)\.?\s+[A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){0,5}/gi, " ")
+    .replace(/\b(?:AEP\s*[- ]?Trainer)\b/gi, " ")
+    .replace(/\b(?:free|break)\b/gi, " ")
+    .replace(/-x-/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  // OCR sometimes leaves a leading assignment/marker before a subject.
+  subject = subject
+    .replace(/^\s*(?:x|X)\s*[=:;-]\s*/g, "")
+    .replace(/^[-:;,.\s]+|[-:;,.\s]+$/g, "")
+    .replace(/\s+\)/g, ")")
+    .replace(/\(\s+/g, "(")
+    .trim();
+
+  return subject;
+}
+
+function isFreeCell(text) {
+  const value = String(text || "")
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[–—]/g, "-");
+
+  if (!value) return true;
+
+  const remaining = value
+    .replace(/-x-/g, "")
+    .replace(/-x=/g, "")
+    .replace(/-x/g, "")
+    .replace(/free/g, "")
+    .replace(/break/g, "")
+    .replace(/x/g, "");
+
+  return remaining.replace(/[^a-z0-9]/g, "").length === 0;
+}
+
+function parseCellContent(text, day, start, end) {
+  const cleaned = normalizeGroupMarkers(text)
+    .replace(/\r/g, "")
+    .trim();
+
+  if (!cleaned || isFreeCell(cleaned)) return null;
+
+  const rooms = extractRooms(cleaned);
+  const teachers = extractTeachers(cleaned);
+  let subject = extractSubjectFromLines(cleaned);
+
+  if (!subject) subject = cleanSubjectText(cleaned);
+
+  // Remove anything that was recognized as a teacher/room from the subject.
+  // This prevents OCR from putting "Dr. ... C-309" into the subject box.
+  for (const teacher of teachers) {
+    subject = subject.replace(teacher, " ");
+  }
+  for (const room of rooms) {
+    subject = subject.replace(room, " ");
+    subject = subject.replace(room.replace(/^LAB\s+/i, ""), " ");
+  }
+  subject = cleanSubjectText(subject);
+
+  if (!subject || isFreeCell(subject)) return null;
+  if (/^(?:3[- ]?Sec[- ]?A(?:\/G[12])?|G[12])$/i.test(subject)) return null;
+
+  return {
+    day,
+    start,
+    end,
+    subject,
+    room: rooms.join(" / "),
+    teacher: teachers.join(", ")
+  };
+}
+
+function normalizeGroupMarkers(text) {
+  return String(text || "")
+    // Tesseract frequently reads the digit 1 as capital I/l.
+    .replace(/3[- ]?Sec[- ]?A\s*\/\s*G[IiLl]1/gi, "3-Sec-A/G1")
+    .replace(/3[- ]?Sec[- ]?A\s*\/\s*G[IiLl]2/gi, "3-Sec-A/G2")
+    .replace(/\bG[IiLl]1\b/gi, "G1")
+    .replace(/\bG[IiLl]2\b/gi, "G2");
+}
+
+function containsBothGroups(text) {
+  const s = normalizeGroupMarkers(text);
+  return (
+    /3[- ]?Sec[- ]?A\s*\/\s*G1/i.test(s) &&
+    /3[- ]?Sec[- ]?A\s*\/\s*G2/i.test(s)
+  );
+}
+
+function timetableBoundaryStrength(gray, width, height, x, y1, y2) {
+  const top = Math.max(0, Math.floor(y1 + 3));
+  const bottom = Math.min(height, Math.ceil(y2 - 3));
+  let best = 0;
+
+  for (let dx = -3; dx <= 3; dx++) {
+    const xx = Math.max(0, Math.min(width - 1, Math.round(x + dx)));
+    let dark = 0;
+    const total = Math.max(1, bottom - top);
+
+    for (let y = top; y < bottom; y++) {
+      if (gray[y * width + xx] < 190) dark++;
+    }
+
+    best = Math.max(best, dark / total);
+  }
+
+  return best;
+}
+
+async function recognizeCanvas(worker, canvas) {
+  const result = await worker.recognize(
+    canvas,
+    {},
+    { text: true }
+  );
+
+  return cleanOcrText(result?.data?.text || "");
+}
+
+async function recognizeSlot(worker, source, x1, y1, x2, y2, scale = 3) {
+  const canvas = cropCanvas(source, x1, y1, x2, y2, scale);
+  return recognizeCanvas(worker, canvas);
+}
+
+function mergeTextParts(parts) {
+  return parts.filter(Boolean).join("\n");
+}
+
+async function scanTimetableLocally(file, setProgress) {
+  if (!file) throw new Error("Please select a timetable image.");
+  if (!file.type || !["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
+    throw new Error("Please upload a JPG, PNG, or WebP timetable image.");
+  }
+  if (file.size > 15 * 1024 * 1024) {
+    throw new Error("That image is larger than 15MB. Please use a smaller photo or screenshot.");
+  }
+
+  if (!window.Tesseract) {
+    throw new Error("The OCR engine could not be loaded. Check your internet connection and try again.");
+  }
+
+  setProgress("Opening timetable image...");
+  const img = await loadImageFromFile(file);
+  const canvas = makeTimetableCanvas(img);
+
+  setProgress("Detecting timetable grid...");
+  const grid = detectTimetableGrid(canvas);
+  const { xLines, yLines, gray, width, height } = grid;
+
+  // The first column contains the day names; the remaining columns are time slots.
+  const dayX1 = xLines[0];
+  const dayX2 = xLines[1];
+  const slotCount = xLines.length - 2;
+
+  if (slotCount < 2) {
+    throw new Error("I couldn't find enough time columns in this timetable.");
+  }
+
+  // Read the time labels from the header. If OCR misses a header, use the
+  // standard FET slots as a safe fallback for the familiar 10-column layout.
+  const fallbackSlots = [
+    ["09:00", "09:50"], ["09:50", "10:40"], ["10:45", "11:35"],
+    ["11:35", "12:25"], ["12:25", "13:15"], ["13:15", "14:05"],
+    ["14:05", "14:55"], ["15:00", "15:50"], ["15:50", "16:40"],
+    ["16:40", "17:30"]
+  ];
+
+  const parseTimes = (text) => {
+    const normalized = String(text || "")
+      .replace(/[‐‑‒–—]/g, "-")
+      .replace(/\b(\d{1,2})\s*[.:]\s*(\d{2})\b/g, "$1:$2");
+    const matches = [...normalized.matchAll(/\b(\d{1,2}):(\d{2})\b/g)]
+      .map(m => `${String(Number(m[1])).padStart(2, "0")}:${m[2]}`)
+      .filter(t => Number(t.slice(0, 2)) < 24 && Number(t.slice(3)) < 60);
+    return [...new Set(matches)];
+  };
+
+  // The header is OCR-read below using the shared Tesseract worker.
+  // Fall back to the familiar 10-slot FET timetable when a header cell is unreadable.
+
+  // Create one Tesseract worker for all cells. This is much faster and more
+  // consistent than creating a worker for every cell.
+  setProgress("Starting OCR — reading timetable cells...");
+  const worker = await Tesseract.createWorker("eng");
+
+  try {
+    // Re-read header with the worker (the helper above needs the worker).
+    const actualHeaderTimes = [];
+    for (let i = 0; i < slotCount; i++) {
+      const text = await recognizeSlot(
+        worker,
+        canvas,
+        xLines[i + 1],
+        yLines[0],
+        xLines[i + 2],
+        yLines[1],
+        3
+      );
+      const times = parseTimes(text);
+      // The FET timetable format used by the project has fixed 10 periods.
+      // If OCR returns an impossible/non-monotonic header, use the known slot
+      // sequence instead of letting a bad header shift every class.
+      let pair = times.length >= 2 ? [times[0], times[1]] : null;
+      if (pair) {
+        const a = timeToMinutes(pair[0]);
+        const b = timeToMinutes(pair[1]);
+        if (a == null || b == null || b <= a) pair = null;
+      }
+      actualHeaderTimes.push(pair || fallbackSlots[i] || null);
+    }
+
+    const slots = actualHeaderTimes;
+    const fallbackDays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
+    const rows = [];
+
+    for (let r = 0; r < Math.min(5, yLines.length - 2); r++) {
+      const rowTop = yLines[r + 1];
+      const rowBottom = yLines[r + 2];
+
+      // Read the day label. If OCR fails, preserve the normal Mon-Fri row order.
+      const dayText = await recognizeSlot(worker, canvas, dayX1, rowTop, dayX2, rowBottom, 3);
+      const day = normalizeDay(dayText) || fallbackDays[r];
+      if (!day) continue;
+
+      const slotTexts = [];
+      for (let c = 0; c < slotCount; c++) {
+        const text = await recognizeSlot(
+          worker,
+          canvas,
+          xLines[c + 1],
+          rowTop,
+          xLines[c + 2],
+          rowBottom,
+          3
+        );
+        slotTexts.push(text);
+      }
+
+      // Merge horizontally merged cells. A real internal border is strong;
+      // a missing/very faint border indicates that adjacent slots belong to
+      // the same physical timetable cell. Free cells are never allowed to
+      // pull a neighbouring class into themselves.
+      let c = 0;
+      while (c < slotCount) {
+        const currentText = slotTexts[c] || "";
+
+        // A merged cell can place all of its visible text in the second
+        // half (because the text is centered). If the current half is empty
+        // and the next half is non-free, only merge when the internal border
+        // is very weak. This handles merged cells without treating ordinary
+        // free periods as part of the next lecture.
+        // A free slot is NEVER merged with the following class.
+        // This is critical for timetables that use "-x-" between lectures:
+        // the empty slot has its own time and must remain empty.
+        if (isFreeCell(currentText)) {
+          c++;
+          continue;
+        }
+
+        let endC = c;
+        while (endC < slotCount - 1) {
+          const boundaryX = xLines[endC + 2];
+          const strength = timetableBoundaryStrength(
+            gray, width, height, boundaryX, rowTop, rowBottom
+          );
+          const nextText = slotTexts[endC + 1] || "";
+
+          // Only merge when the border is genuinely weak AND the next slot
+          // contains non-free content. This is the key protection against
+          // free lectures corrupting the timing of the next class.
+          if (strength < 0.12 && !isFreeCell(nextText)) {
+            endC++;
+          } else {
+            break;
+          }
+        }
+
+        const mergedText = slotTexts.slice(c, endC + 1).filter(Boolean).join("\n");
+        const start = slots[c]?.[0];
+        const end = slots[endC]?.[1];
+        if (start && end && !isFreeCell(mergedText)) {
+          // If a single physical cell contains both G1 and G2 activities,
+          // OCR the left and right halves separately instead of mixing them.
+          if (containsBothGroups(mergedText) && endC === c) {
+            const leftText = await recognizeSlot(
+              worker,
+              canvas,
+              xLines[c + 1],
+              rowTop,
+              Math.round((xLines[c + 1] + xLines[c + 2]) / 2),
+              rowBottom,
+              3
+            );
+            const rightText = await recognizeSlot(
+              worker,
+              canvas,
+              Math.round((xLines[c + 1] + xLines[c + 2]) / 2),
+              rowTop,
+              xLines[c + 2],
+              rowBottom,
+              3
+            );
+
+            const left = parseCellContent(leftText, day, start, end);
+            const right = parseCellContent(rightText, day, start, end);
+            if (left) rows.push(left);
+            if (right) rows.push(right);
+          } else {
+            const parsed = parseCellContent(mergedText, day, start, end);
+            if (parsed) rows.push(parsed);
+          }
+        }
+
+        c = endC + 1;
+      }
+
+      setProgress(`Reading ${day}... (${r + 1}/5)`);
+    }
+
+    const cleaned = rows.filter(Boolean);
+    if (!cleaned.length) {
+      throw new Error("No classes could be read from this timetable. Please upload a clear image containing the complete grid.");
+    }
+
+    setProgress(`Read ${cleaned.length} classes from your uploaded timetable.`);
+    return cleaned;
+  } finally {
+    await worker.terminate();
+  }
+}
+
+function examImagePrompt() {
+  const today = todayStr();
+  const year = new Date().getFullYear();
+  return `This image shows an exam datesheet/schedule. Extract every exam into a JSON array. Each item must have exactly these fields: "subject" (exam/subject name), "date" (YYYY-MM-DD format; if no year is printed, assume ${year} unless the month has clearly already passed this year, in which case use ${year + 1} — today's date is ${today}), "time" (24-hour HH:MM, empty string if unknown), "room" (empty string if unknown), "notes" (any extra printed detail like syllabus coverage or instructions, empty string if none). Respond with ONLY the raw JSON array, no markdown code fences, no explanation, no extra text before or after. If the image is not an exam datesheet or nothing can be read, respond with [].`;
+}
+
+async function extractFromImage(file, kind, apiKey) {
+  if (!apiKey) {
+    throw new Error(
+      "Add your Anthropic API key in Settings first to use exam datesheet photo scanning."
+    );
+  }
+
+  if (file.size > 5 * 1024 * 1024) {
+    throw new Error(
+      "That image is larger than 5MB — try a smaller photo or a cropped screenshot."
+    );
+  }
+
+  const { base64, mediaType } = await fileToBase64(file);
+
+  if (!["image/png", "image/jpeg"].includes(mediaType)) {
+    throw new Error("Please upload a JPG or PNG image.");
+  }
+
+  let response;
+
+  try {
+    response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-5",
+        max_tokens: 8000,
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "image",
+                source: {
+                  type: "base64",
+                  media_type: mediaType,
+                  data: base64
+                }
+              },
+              {
+                type: "text",
+                text: examImagePrompt()
+              }
+            ]
+          }
+        ]
+      })
+    });
+  } catch (networkErr) {
+    throw new Error(
+      "Network error reaching the exam image reader. Check your connection and try again."
+    );
+  }
+
+  if (!response.ok) {
+    let detail = "";
+
+    try {
+      const errBody = await response.json();
+      detail =
+        errBody?.error?.message ||
+        JSON.stringify(errBody).slice(0, 200);
+    } catch (e) {
+      detail = await response.text().catch(() => "");
+    }
+
+    throw new Error(
+      `Exam image reader returned an error (${response.status}). ${detail || ""}`.trim()
+    );
+  }
+
+  const data = await response.json();
+  const text = (data.content || [])
+    .map(b => b.text || "")
+    .join("\n");
+
+  if (!text.trim()) {
+    throw new Error("The exam image reader returned an empty response.");
+  }
+
+  return parseJsonArray(text);
+}
+
+const TABS = [
+  { id: "chat", label: "Assistant", icon: MessageCircle },
+  { id: "timetable", label: "Timetable", icon: Calendar },
+  { id: "homework", label: "Homework", icon: BookOpen },
+  { id: "exams", label: "Exams", icon: GraduationCap },
+];
+
+function App() {
+  const [tab, setTab] = useState("chat");
+  const [timetable, setTimetable] = useState([]);
+  const [homework, setHomework] = useState([]);
+  const [exams, setExams] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [messages, setMessages] = useState([
+    { id: genId(), sender: "bot", text: "Hey, I'm Lucy, your personal manager.", time: new Date() },
+    { id: genId(), sender: "bot", text: "I'll help you manage your timetable and classes.", time: new Date() },
+  ]);
+  const [input, setInput] = useState("");
+  const [notifPermission, setNotifPermission] = useState(
+    typeof Notification !== "undefined" ? Notification.permission : "unsupported"
+  );
+  const [, setTick] = useState(0);
+  const [toasts, setToasts] = useState([]);
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem("lucy-api-key") || "");
+  const [showSettings, setShowSettings] = useState(false);
+  const notifiedRef = useRef(new Set());
+  const chatEndRef = useRef(null);
+  const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    localStorage.setItem("lucy-api-key", apiKey);
+  }, [apiKey]);
+
+  // Load persisted data
+  useEffect(() => {
+    (async () => {
+      try {
+        const tt = await storage.get("classmate-timetable");
+        if (tt) setTimetable(JSON.parse(tt.value));
+      } catch (e) {}
+      try {
+        const hw = await storage.get("classmate-homework");
+        if (hw) setHomework(JSON.parse(hw.value));
+      } catch (e) {}
+      try {
+        const ex = await storage.get("classmate-exams");
+        if (ex) setExams(JSON.parse(ex.value));
+      } catch (e) {}
+      setLoaded(true);
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    storage.set("classmate-timetable", JSON.stringify(timetable)).catch(() => {});
+  }, [timetable, loaded]);
+  useEffect(() => {
+    if (!loaded) return;
+    storage.set("classmate-homework", JSON.stringify(homework)).catch(() => {});
+  }, [homework, loaded]);
+  useEffect(() => {
+    if (!loaded) return;
+    storage.set("classmate-exams", JSON.stringify(exams)).catch(() => {});
+  }, [exams, loaded]);
+
+  // live clock tick for countdown display
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 30000);
+    return () => clearInterval(id);
+  }, []);
+
+  // scroll chat to bottom
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, tab]);
+
+  function addBotMessage(text) {
+    setMessages((prev) => [...prev, { id: genId(), sender: "bot", text, time: new Date() }]);
+  }
+  function fireNotification(title, body) {
+    if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+      try { new Notification(title, { body }); } catch (e) {}
+    }
+  }
+  function pushToast(title, body) {
+    const id = genId();
+    setToasts((prev) => [...prev, { id, title, body }]);
+    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 8000);
+  }
+  function dismissToast(id) {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }
+  function alertUser(title, body, chatText) {
+    addBotMessage(chatText);
+    pushToast(title, body);
+    fireNotification(title, body);
+  }
+
+  // reminder engine
+  useEffect(() => {
+    if (!loaded) return;
+    function runCheck() {
+      const now = new Date();
+      const nowMinutes = now.getHours() * 60 + now.getMinutes();
+      const dayName = DAYS[now.getDay()];
+      const today = todayStr();
+
+      timetable.forEach((e) => {
+        if (e.day !== dayName || !e.start) return;
+        const diff = timeToMinutes(e.start) - nowMinutes;
+        const key = `class-${e.id}-${today}`;
+        if (diff <= 10 && diff >= 0 && !notifiedRef.current.has(key)) {
+          notifiedRef.current.add(key);
+          const when = diff <= 1 ? "now" : `in ${diff} min`;
+          alertUser(
+            `${e.subject} starting soon`,
+            `Room ${e.room || "TBA"} • ${e.teacher || ""}`,
+            `Your next class is ${e.subject} in Room ${e.room || "TBA"} with ${e.teacher || "your teacher"} — starting ${when}.`
+          );
+        }
+      });
+
+      homework.forEach((h) => {
+        if (!h.dueDate) return;
+        const key = `hw-${h.id}-${today}`;
+        if (h.dueDate === today && !notifiedRef.current.has(key)) {
+          notifiedRef.current.add(key);
+          alertUser(
+            "Homework due today",
+            `${h.subject}: ${h.description}`,
+            `Reminder: ${h.subject} homework — "${h.description}" is due today.`
+          );
+        }
+      });
+
+      exams.forEach((ex) => {
+        if (!ex.date) return;
+        const examDate = new Date(ex.date + "T00:00:00");
+        const diffDays = Math.round((examDate - new Date(today + "T00:00:00")) / 86400000);
+        const key = `exam-${ex.id}-${today}`;
+        if (diffDays >= 0 && diffDays <= 3 && !notifiedRef.current.has(key)) {
+          notifiedRef.current.add(key);
+          const when = diffDays === 0 ? "today" : diffDays === 1 ? "tomorrow" : `in ${diffDays} days`;
+          alertUser(
+            `Upcoming exam: ${ex.subject}`,
+            `${when} • Room ${ex.room || "TBA"}`,
+            `Exam alert: ${ex.subject} exam is ${when} (${formatDateReadable(ex.date)}) in Room ${ex.room || "TBA"}.`
+          );
+        }
+      });
+    }
+    runCheck();
+    const id = setInterval(runCheck, 20000);
+    return () => clearInterval(id);
+  }, [timetable, homework, exams, loaded]);
+
+  function requestNotifPermission() {
+    if (typeof Notification === "undefined") return;
+    Notification.requestPermission().then((p) => setNotifPermission(p));
+  }
+
+  function nextClassSummary() {
+    const next = getNextClass(timetable, new Date());
+    if (!next) return "You don't have any classes on your timetable yet. Add some in the Timetable tab.";
+    const { entry, daysAway } = next;
+    if (daysAway === 0) {
+      const mins = timeToMinutes(entry.start) - (new Date().getHours() * 60 + new Date().getMinutes());
+      return `Your next class is ${entry.subject} in Room ${entry.room || "TBA"} with ${entry.teacher || "your teacher"}, starting at ${formatTime12(entry.start)} (in ${mins} min).`;
+    }
+    return `Your next class is ${entry.subject} on ${entry.day} at ${formatTime12(entry.start)} in Room ${entry.room || "TBA"} with ${entry.teacher || "your teacher"}.`;
+  }
+
+  function getBotResponse(raw) {
+    const text = raw.toLowerCase();
+    if (text.includes("next class") || text.includes("next lecture") || text.includes("upcoming class") || text.includes("what next")) {
+      return nextClassSummary();
+    }
+    if (text.includes("homework")) {
+      const today = todayStr();
+      const pending = [...homework].filter((h) => !h.dueDate || h.dueDate >= today).sort((a, b) => (a.dueDate || "").localeCompare(b.dueDate || ""));
+      if (pending.length === 0) return "You're all caught up — no pending homework logged.";
+      return "Here's what's pending:\n" + pending.slice(0, 6).map((h) => `• ${h.subject}: ${h.description} (due ${formatDateReadable(h.dueDate)})`).join("\n");
+    }
+    if (text.includes("exam") || text.includes("datesheet") || text.includes("test")) {
+      const today = todayStr();
+      const upcoming = [...exams].filter((e) => !e.date || e.date >= today).sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+      if (upcoming.length === 0) return "No exams on your datesheet yet. Add them in the Exams tab.";
+      return "Upcoming exams:\n" + upcoming.slice(0, 6).map((e) => `• ${e.subject} — ${formatDateReadable(e.date)} at ${formatTime12(e.time)}, Room ${e.room || "TBA"}`).join("\n");
+    }
+    const mentionedDay = DAYS.find((d) => text.includes(d.toLowerCase()));
+    const targetDay = mentionedDay || (text.includes("today") ? todayName() : null);
+    if (targetDay) {
+      const dayClasses = timetable.filter((e) => e.day === targetDay && e.start).sort((a, b) => timeToMinutes(a.start) - timeToMinutes(b.start));
+      if (dayClasses.length === 0) {
+        return `No information available for this day.\n\n${nextClassSummary()}`;
+      }
+      const label = targetDay === todayName() ? `${targetDay} (today)` : targetDay;
+      return `Here's what's on ${label}:\n` + dayClasses.map((e) => `• ${formatTime12(e.start)} — ${e.subject} in Room ${e.room || "TBA"} (${e.teacher || "—"})`).join("\n");
+    }
+    return "I can tell you about your next class, a specific day's schedule, pending homework, or upcoming exams. Just ask!";
+  }
+
+  function handleSend(text) {
+    const trimmed = (text ?? input).trim();
+    if (!trimmed) return;
+    setMessages((prev) => [...prev, { id: genId(), sender: "user", text: trimmed, time: new Date() }]);
+    setInput("");
+    setTimeout(() => {
+      setMessages((prev) => [...prev, { id: genId(), sender: "bot", text: getBotResponse(trimmed), time: new Date() }]);
+    }, 450);
+  }
+
+  function handleCsvUpload(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      Papa.parse(ev.target.result, {
+        header: true,
+        skipEmptyLines: true,
+        complete: (results) => {
+          const newEntries = results.data
+            .map((row) => {
+              const norm = {};
+              Object.keys(row).forEach((k) => (norm[k.trim().toLowerCase()] = row[k]?.trim?.() ?? row[k]));
+              const day = DAYS.find((d) => d.toLowerCase() === (norm.day || "").toLowerCase());
+              if (!day || !norm.subject) return null;
+              return {
+                id: genId(),
+                day,
+                start: norm.start || "",
+                end: norm.end || "",
+                subject: norm.subject,
+                room: norm.room || "",
+                teacher: norm.teacher || "",
+              };
+            })
+            .filter(Boolean);
+          if (newEntries.length > 0) {
+            setTimetable((prev) => [...prev, ...newEntries]);
+            addBotMessage(`Imported ${newEntries.length} class${newEntries.length > 1 ? "es" : ""} from your CSV.`);
+            setTab("timetable");
+          } else {
+            addBotMessage("I couldn't find valid rows in that CSV. Make sure it has columns: day, start, end, subject, room, teacher.");
+          }
+        },
+      });
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  }
+
+  const nextClassInfo = loaded ? getNextClass(timetable, new Date()) : null;
+
+  return (
+    <div style={{ fontFamily: "'Inter', ui-sans-serif, system-ui" }} className="min-h-screen w-full flex bg-stone-50 text-slate-800">
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500;600&display=swap');
+        .font-display { font-family: 'Space Grotesk', sans-serif; }
+        .font-mono-c { font-family: 'JetBrains Mono', monospace; }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+        @keyframes toast-in { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: translateX(0); } }
+        .toast-anim { animation: toast-in 0.25s ease-out; }
+      `}</style>
+
+      {/* Alert toasts */}
+      <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 w-72 max-w-[85vw]">
+        {toasts.map((t) => (
+          <div key={t.id} className="toast-anim bg-slate-900 text-white rounded-xl shadow-lg px-4 py-3 flex items-start gap-2">
+            <BellRing size={16} className="text-amber-400 shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-semibold truncate">{t.title}</p>
+              {t.body && <p className="text-xs text-slate-300 mt-0.5">{t.body}</p>}
+            </div>
+            <button onClick={() => dismissToast(t.id)} className="text-slate-400 hover:text-white shrink-0"><X size={14} /></button>
+          </div>
+        ))}
+      </div>
+
+      {/* Sidebar */}
+      <div className="w-16 md:w-56 bg-slate-900 text-slate-200 flex flex-col shrink-0">
+        <div className="flex items-center gap-2 px-3 md:px-5 py-5 border-b border-slate-800">
+          <School size={22} className="text-amber-400 shrink-0" />
+          <span className="font-display font-bold text-lg text-white hidden md:inline">Lucy</span>
+        </div>
+        <nav className="flex flex-col gap-1 p-2 md:p-3">
+          {TABS.map((t) => {
+            const Icon = t.icon;
+            const active = tab === t.id;
+            return (
+              <button
+                key={t.id}
+                onClick={() => setTab(t.id)}
+                className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition ${
+                  active ? "bg-amber-400 text-slate-900 font-semibold" : "hover:bg-slate-800 text-slate-300"
+                }`}
+              >
+                <Icon size={18} className="shrink-0" />
+                <span className="hidden md:inline">{t.label}</span>
+              </button>
+            );
+          })}
+        </nav>
+        <div className="mt-auto p-2 md:p-3 flex flex-col gap-1">
+          <button
+            onClick={requestNotifPermission}
+            disabled={notifPermission === "granted" || notifPermission === "unsupported"}
+            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs text-slate-300 hover:bg-slate-800 disabled:opacity-60"
+          >
+            {notifPermission === "granted" ? <BellRing size={16} className="text-amber-400 shrink-0" /> : <BellOff size={16} className="shrink-0" />}
+            <span className="hidden md:inline">
+              {notifPermission === "granted" ? "Notifications on" : notifPermission === "unsupported" ? "Notifications unavailable" : "Enable notifications"}
+            </span>
+          </button>
+          <button
+            onClick={() => alertUser("Test alert", "This is what a Lucy reminder looks like.", "Just testing — this is what a reminder from me looks like.")}
+            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs text-slate-300 hover:bg-slate-800"
+          >
+            <Bell size={16} className="shrink-0" />
+            <span className="hidden md:inline">Send test alert</span>
+          </button>
+          <button
+            onClick={() => setShowSettings(true)}
+            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs text-slate-300 hover:bg-slate-800"
+          >
+            <span className="shrink-0" style={{ fontSize: 16, lineHeight: 1 }}>⚙️</span>
+            <span className="hidden md:inline">Settings</span>
+          </button>
+        </div>
+      </div>
+
+      {showSettings && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setShowSettings(false)}>
+          <div className="bg-white rounded-xl p-5 max-w-sm w-full" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-display font-bold text-slate-900">Settings</h3>
+              <button onClick={() => setShowSettings(false)} className="text-slate-400 hover:text-slate-600"><X size={16} /></button>
+            </div>
+            <label className="text-xs text-slate-500">Anthropic API key (optional)</label>
+            <input
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="sk-ant-..."
+              className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1"
+            />
+            <p className="text-xs text-slate-400 mt-2">
+              Optional: used only for exam datesheet photo scanning. Timetable scanning uses local OCR and does not need an API key. The key is stored in this browser only and is sent directly to Anthropic only when you scan an exam datesheet.
+              Get a key at <span className="text-slate-600">console.anthropic.com</span>.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Main */}
+      <div className="flex-1 flex flex-col min-w-0">
+        {/* Next up strip */}
+        <div className="bg-slate-900 text-white px-4 md:px-8 py-3 flex items-center gap-3 shrink-0">
+          <Clock size={16} className="text-amber-400 shrink-0" />
+          <span className="text-xs uppercase tracking-wider text-slate-400 shrink-0">Next up</span>
+          {nextClassInfo ? (
+            <span className="font-mono-c text-sm truncate">
+              <span className="text-amber-300 font-semibold">{nextClassInfo.entry.subject}</span>
+              {"  "}· Room {nextClassInfo.entry.room || "TBA"} · {nextClassInfo.entry.teacher || "—"} ·{" "}
+              {nextClassInfo.daysAway === 0
+                ? `today ${formatTime12(nextClassInfo.entry.start)}`
+                : `${nextClassInfo.entry.day} ${formatTime12(nextClassInfo.entry.start)}`}
+            </span>
+          ) : (
+            <span className="text-sm text-slate-400">No classes scheduled yet — add your timetable below.</span>
+          )}
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-4 md:p-8">
+          {tab === "chat" && (
+            <div className="max-w-2xl mx-auto flex flex-col h-full">
+              <div className="flex-1 flex flex-col gap-3 pb-4">
+                {messages.map((m) => (
+                  <div key={m.id} className={`flex ${m.sender === "user" ? "justify-end" : "justify-start"}`}>
+                    <div
+                      className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm whitespace-pre-line ${
+                        m.sender === "user" ? "bg-amber-400 text-slate-900" : "bg-slate-900 text-slate-100"
+                      }`}
+                    >
+                      {m.text}
+                    </div>
+                  </div>
+                ))}
+                <div ref={chatEndRef} />
+              </div>
+              <div className="flex gap-2 flex-wrap mb-2">
+                {["Next class", "Today's classes", "Homework", "Exams"].map((q) => (
+                  <button
+                    key={q}
+                    onClick={() => handleSend(q)}
+                    className="text-xs px-3 py-1.5 rounded-full border border-slate-300 text-slate-600 hover:bg-slate-100"
+                  >
+                    {q}
+                  </button>
+                ))}
+              </div>
+              <div className="flex gap-2 sticky bottom-0 bg-stone-50 pt-2">
+                <input
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleSend()}
+                  placeholder="Ask about your next class, homework, or exams..."
+                  className="flex-1 border border-slate-300 rounded-full px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400"
+                />
+                <button
+                  onClick={() => handleSend()}
+                  className="bg-slate-900 text-white rounded-full w-10 h-10 flex items-center justify-center shrink-0 hover:bg-slate-800"
+                >
+                  <Send size={16} />
+                </button>
+              </div>
+            </div>
+          )}
+
+          {tab === "timetable" && (
+            <TimetableTab
+              timetable={timetable}
+              setTimetable={setTimetable}
+              fileInputRef={fileInputRef}
+              handleCsvUpload={handleCsvUpload}
+             />
+          )}
+
+          {tab === "homework" && (
+            <HomeworkTab homework={homework} setHomework={setHomework} subjects={[...new Set(timetable.map((e) => e.subject))]} />
+          )}
+
+          {tab === "exams" && <ExamsTab exams={exams} setExams={setExams} apiKey={apiKey} />}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Card({ children }) {
+  return <div className="bg-white border border-slate-200 rounded-xl p-4 md:p-5">{children}</div>;
+}
+
+function SectionHeader({ icon: Icon, title, subtitle }) {
+  return (
+    <div className="flex items-center gap-2 mb-4">
+      <Icon size={20} className="text-amber-500" />
+      <div>
+        <h2 className="font-display font-bold text-lg text-slate-900">{title}</h2>
+        {subtitle && <p className="text-xs text-slate-500">{subtitle}</p>}
+      </div>
+    </div>
+  );
+}
+
+function cleanTimetableRows(rows) {
+  const validTime = (value) => /^([01]\d|2[0-3]):[0-5]\d$/.test(String(value || ""));
+
+  const cleanText = (value) => String(value || "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const normalizeTime = (value) => {
+    const text = cleanText(value);
+    const match = text.match(/\b(\d{1,2}):(\d{2})\b/);
+    if (!match) return "";
+    const h = Number(match[1]);
+    const m = Number(match[2]);
+    if (h > 23 || m > 59) return "";
+    return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+  };
+
+  const cleanSubject = (value) => cleanText(value)
+    .replace(/\b3-Sec-A\/G[12]\b/gi, "")
+    .replace(/\b3-Sec-A\b/gi, "")
+    .replace(/\bG[12]\b/gi, "")
+    .replace(/\b\d{1,2}:\d{2}\s*(?:-|–|—)\s*\d{1,2}:\d{2}\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const isFree = (subject) => {
+    const s = cleanText(subject).toLowerCase();
+    return !s || s === "-x-" || s === "-x" || s === "x" || s === "free" || s === "break";
+  };
+
+  const rowsOut = [];
+
+  for (const r of Array.isArray(rows) ? rows : []) {
+    const day = normalizeDay(r?.day);
+    if (!day) continue;
+
+    let subject = cleanSubject(r?.subject);
+    if (isFree(subject)) continue;
+
+    // Never allow a section-only value to become a class.
+    if (/^(3-Sec-A(?:\/G[12])?|G[12])$/i.test(subject)) continue;
+
+    const start = normalizeTime(r?.start);
+    const end = normalizeTime(r?.end);
+
+    // A timetable class should normally have a valid start/end. If the AI
+    // cannot determine them, hide the row instead of showing a misleading
+    // "--:--" entry in the preview.
+    if (!validTime(start) || !validTime(end)) continue;
+
+    const room = cleanText(r?.room);
+    const teacher = cleanText(r?.teacher);
+
+    rowsOut.push({
+      id: genId(),
+      include: true,
+      day,
+      start,
+      end,
+      subject,
+      room,
+      teacher,
+    });
+  }
+
+  // Remove exact duplicates caused by OCR/vision repetition.
+  const seen = new Set();
+  return rowsOut.filter((r) => {
+    const key = [r.day, r.start, r.end, r.subject, r.room, r.teacher]
+      .map((x) => x.toLowerCase())
+      .join("|");
+
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function TimetableTab({ timetable, setTimetable, fileInputRef, handleCsvUpload }) {
+  const [form, setForm] = useState({ day: "Monday", start: "", end: "", subject: "", room: "", teacher: "" });
+  const [formError, setFormError] = useState(null);
+  const [preview, setPreview] = useState(null);
+  const [scanning, setScanning] = useState(false);
+  const [scanProgress, setScanProgress] = useState("");
+  const [scanError, setScanError] = useState(null);
+  const imageInputRef = useRef(null);
+
+  function addEntry(e) {
+    e.preventDefault();
+    if (!form.subject.trim()) {
+      setFormError("Add a subject name before saving this class.");
+      return;
+    }
+    setFormError(null);
+    setTimetable((prev) => [...prev, { ...form, subject: form.subject.trim(), id: genId() }]);
+    setForm({ day: form.day, start: "", end: "", subject: "", room: "", teacher: "" });
+  }
+  function removeEntry(id) {
+    setTimetable((prev) => prev.filter((e) => e.id !== id));
+  }
+
+  async function handleImageFile(e) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+
+    if (!file) return;
+
+    setScanning(true);
+    setScanProgress("Starting local OCR...");
+    setScanError(null);
+    setPreview(null);
+
+    try {
+      const rows = await scanTimetableLocally(
+        file,
+        setScanProgress
+      );
+
+      const cleaned = cleanTimetableRows(rows);
+
+      if (cleaned.length === 0) {
+        setScanError(
+          "I couldn't reliably identify any classes. Please use the full timetable image and try again."
+        );
+        setScanProgress("");
+      } else {
+        setPreview(cleaned);
+        setScanProgress(
+          `Found ${cleaned.length} classes. Check the details before adding.`
+        );
+      }
+    } catch (err) {
+      console.error("Local timetable OCR error:", err);
+      setScanError(
+        err?.message ||
+        "Something went wrong while reading the timetable."
+      );
+      setScanProgress("");
+    } finally {
+      setScanning(false);
+    }
+  }
+
+  function updatePreviewRow(i, patch) {
+    setPreview((prev) => prev.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+  }
+  function getPreviewEntries() {
+    return preview
+      .filter((r) => r.include && r.day && r.subject)
+      .map(({ id, include, ...rest }) => ({ ...rest, id: genId() }));
+  }
+
+  function replaceWithPreview() {
+    setTimetable(getPreviewEntries());
+    setPreview(null);
+  }
+
+  function addPreviewToExisting() {
+    const toAdd = getPreviewEntries();
+    setTimetable((prev) => [...prev, ...toAdd]);
+    setPreview(null);
+  }
+
+  const sorted = [...timetable].sort((a, b) => {
+    const di = DAYS.indexOf(a.day) - DAYS.indexOf(b.day);
+    if (di !== 0) return di;
+    return (timeToMinutes(a.start) ?? 9999) - (timeToMinutes(b.start) ?? 9999);
+  });
+
+  return (
+    <div className="max-w-3xl mx-auto space-y-6">
+      <SectionHeader icon={Calendar} title="Timetable" subtitle="Add classes manually or import a CSV" />
+
+      <Card>
+        <form onSubmit={addEntry} className="grid grid-cols-2 md:grid-cols-6 gap-2 items-end">
+          <div className="col-span-2 md:col-span-1">
+            <label className="text-xs text-slate-500">Day</label>
+            <select value={form.day} onChange={(e) => setForm({ ...form, day: e.target.value })} className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm">
+              {DAYS.map((d) => <option key={d} value={d}>{d}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-slate-500">Start</label>
+            <input type="time" value={form.start} onChange={(e) => setForm({ ...form, start: e.target.value })} className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
+          </div>
+          <div>
+            <label className="text-xs text-slate-500">End</label>
+            <input type="time" value={form.end} onChange={(e) => setForm({ ...form, end: e.target.value })} className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
+          </div>
+          <div>
+            <label className="text-xs text-slate-500">Subject *</label>
+            <input value={form.subject} onChange={(e) => setForm({ ...form, subject: e.target.value })} placeholder="Math" className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
+          </div>
+          <div>
+            <label className="text-xs text-slate-500">Room</label>
+            <input value={form.room} onChange={(e) => setForm({ ...form, room: e.target.value })} placeholder="204" className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
+          </div>
+          <div>
+            <label className="text-xs text-slate-500">Teacher</label>
+            <input value={form.teacher} onChange={(e) => setForm({ ...form, teacher: e.target.value })} placeholder="Mr. Sharma" className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
+          </div>
+          {formError && <p className="col-span-2 md:col-span-6 text-xs text-rose-500">{formError}</p>}
+          <button type="submit" className="col-span-2 md:col-span-6 bg-amber-400 text-slate-900 font-semibold rounded-md py-2 text-sm flex items-center justify-center gap-1 hover:bg-amber-300">
+            <Plus size={16} /> Add class
+          </button>
+        </form>
+      </Card>
+
+      <div className="flex items-center gap-3 flex-wrap">
+        <button
+          onClick={() => fileInputRef.current?.click()}
+          className="flex items-center gap-2 text-sm border border-slate-300 rounded-md px-3 py-2 hover:bg-slate-100"
+        >
+          <Upload size={15} /> Upload CSV
+        </button>
+        <input ref={fileInputRef} type="file" accept=".csv" onChange={handleCsvUpload} className="hidden" />
+        <button
+          onClick={() => imageInputRef.current?.click()}
+          disabled={scanning}
+          className="flex items-center gap-2 text-sm border border-slate-300 rounded-md px-3 py-2 hover:bg-slate-100 disabled:opacity-60"
+        >
+          {scanning ? <Loader2 size={15} className="animate-spin" /> : <ScanLine size={15} />}
+          {scanning ? "Reading image..." : "Scan timetable photo"}
+        </button>
+        <input ref={imageInputRef} type="file" accept="image/png,image/jpeg" onChange={handleImageFile} className="hidden" />
+        <span className="text-xs text-slate-400">CSV: day, start, end, subject, room, teacher • Photo scanner reads the timetable grid locally</span>
+      {scanProgress && (
+        <p className={`text-xs ${scanning ? "text-amber-600" : "text-slate-500"}`}>
+          {scanProgress}
+        </p>
+      )}
+      </div>
+
+      {scanError && (
+        <div className="flex items-start justify-between gap-2 bg-rose-50 border border-rose-200 text-rose-600 text-sm rounded-lg px-4 py-3">
+          <span>{scanError}</span>
+          <button onClick={() => setScanError(null)} className="shrink-0"><X size={14} /></button>
+        </div>
+      )}
+
+      {preview && preview.length > 0 && (
+        <Card>
+          <div className="flex items-center justify-between mb-3">
+            <p className="text-sm font-medium">Found {preview.length} class{preview.length > 1 ? "es" : ""} — check the details before adding</p>
+            <button onClick={() => setPreview(null)} className="text-xs text-slate-400 hover:text-slate-600 shrink-0">Discard</button>
+          </div>
+          <div className="space-y-2">
+            {preview.map((r, i) => (
+              <div key={r.id} className="flex items-center gap-2 flex-wrap">
+                <input type="checkbox" checked={r.include} onChange={() => updatePreviewRow(i, { include: !r.include })} className="shrink-0" />
+                <select
+                  value={r.day || ""}
+                  onChange={(e) => updatePreviewRow(i, { day: e.target.value })}
+                  className={`border rounded px-1.5 py-1 text-xs w-24 shrink-0 ${r.day ? "border-slate-300" : "border-rose-300 text-rose-500"}`}
+                >
+                  <option value="">Day?</option>
+                  {DAYS.map((d) => <option key={d} value={d}>{d}</option>)}
+                </select>
+                <input type="time" value={r.start} onChange={(e) => updatePreviewRow(i, { start: e.target.value })} className="border border-slate-300 rounded px-1.5 py-1 text-xs w-24 shrink-0" />
+                <input type="time" value={r.end} onChange={(e) => updatePreviewRow(i, { end: e.target.value })} className="border border-slate-300 rounded px-1.5 py-1 text-xs w-24 shrink-0" />
+                <input value={r.subject} onChange={(e) => updatePreviewRow(i, { subject: e.target.value })} placeholder="Subject" className="border border-slate-300 rounded px-1.5 py-1 text-xs flex-1 min-w-[90px]" />
+                <input value={r.room} onChange={(e) => updatePreviewRow(i, { room: e.target.value })} placeholder="Room" className="border border-slate-300 rounded px-1.5 py-1 text-xs w-16 shrink-0" />
+                <input value={r.teacher} onChange={(e) => updatePreviewRow(i, { teacher: e.target.value })} placeholder="Teacher" className="border border-slate-300 rounded px-1.5 py-1 text-xs w-28 shrink-0" />
+              </div>
+            ))}
+          </div>
+          <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2">
+            <button onClick={replaceWithPreview} className="w-full bg-amber-400 text-slate-900 font-semibold rounded-md py-2 text-sm hover:bg-amber-300">
+              Replace timetable ({preview.filter((r) => r.include && r.day && r.subject).length})
+            </button>
+            <button onClick={addPreviewToExisting} className="w-full border border-slate-300 text-slate-700 font-semibold rounded-md py-2 text-sm hover:bg-slate-100">
+              Add to existing ({preview.filter((r) => r.include && r.day && r.subject).length})
+            </button>
+          </div>
+        </Card>
+      )}
+
+      <div className="space-y-2">
+        {sorted.length === 0 && <p className="text-sm text-slate-400 text-center py-8">No classes yet. Add one above.</p>}
+        {sorted.map((e) => (
+          <div key={e.id} className="flex items-center gap-3 bg-white border border-slate-200 rounded-lg px-4 py-3">
+            <div className="font-mono-c text-xs bg-slate-100 text-slate-600 rounded px-2 py-1 w-14 text-center shrink-0">{e.day.slice(0, 3)}</div>
+            <div className="font-mono-c text-xs text-slate-500 w-28 shrink-0">{formatTime12(e.start)} – {formatTime12(e.end)}</div>
+            <div className="flex-1 min-w-0">
+              <p className="font-medium text-sm truncate">{e.subject}</p>
+              <p className="text-xs text-slate-500 truncate">Room {e.room || "TBA"} · {e.teacher || "—"}</p>
+            </div>
+            <button onClick={() => removeEntry(e.id)} className="text-slate-400 hover:text-rose-500 shrink-0"><Trash2 size={16} /></button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function HomeworkTab({ homework, setHomework, subjects }) {
+  const [form, setForm] = useState({ subject: "", description: "", dueDate: "" });
+
+  function addEntry(e) {
+    e.preventDefault();
+    if (!form.subject || !form.description) return;
+    setHomework((prev) => [...prev, { ...form, id: genId(), addedDate: todayStr() }]);
+    setForm({ subject: "", description: "", dueDate: "" });
+  }
+  function removeEntry(id) {
+    setHomework((prev) => prev.filter((h) => h.id !== id));
+  }
+
+  const sorted = [...homework].sort((a, b) => (a.dueDate || "").localeCompare(b.dueDate || ""));
+
+  return (
+    <div className="max-w-2xl mx-auto space-y-6">
+      <SectionHeader icon={BookOpen} title="Homework" subtitle="Log homework given in a lecture, with a due date" />
+
+      <Card>
+        <form onSubmit={addEntry} className="space-y-3">
+          <div className="flex gap-2">
+            <div className="flex-1">
+              <label className="text-xs text-slate-500">Subject</label>
+              <input
+                list="subject-list"
+                value={form.subject}
+                onChange={(e) => setForm({ ...form, subject: e.target.value })}
+                placeholder="Physics"
+                className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm"
+              />
+              <datalist id="subject-list">{subjects.map((s) => <option key={s} value={s} />)}</datalist>
+            </div>
+            <div className="w-40">
+              <label className="text-xs text-slate-500">Due date</label>
+              <input type="date" value={form.dueDate} onChange={(e) => setForm({ ...form, dueDate: e.target.value })} className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
+            </div>
+          </div>
+          <div>
+            <label className="text-xs text-slate-500">What's the homework?</label>
+            <textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="Solve exercises 4.1–4.5" rows={2} className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
+          </div>
+          <button type="submit" className="w-full bg-amber-400 text-slate-900 font-semibold rounded-md py-2 text-sm flex items-center justify-center gap-1 hover:bg-amber-300">
+            <Plus size={16} /> Add homework
+          </button>
+        </form>
+      </Card>
+
+      <div className="space-y-2">
+        {sorted.length === 0 && <p className="text-sm text-slate-400 text-center py-8">No homework logged yet.</p>}
+        {sorted.map((h) => {
+          const overdue = h.dueDate && h.dueDate < todayStr();
+          return (
+            <div key={h.id} className="flex items-start gap-3 bg-white border border-slate-200 rounded-lg px-4 py-3">
+              <div className="flex-1 min-w-0">
+                <p className="font-medium text-sm">{h.subject}</p>
+                <p className="text-sm text-slate-600">{h.description}</p>
+                <p className={`text-xs mt-1 ${overdue ? "text-rose-500" : "text-slate-400"}`}>
+                  Due {formatDateReadable(h.dueDate)} {overdue && "· overdue"}
+                </p>
+              </div>
+              <button onClick={() => removeEntry(h.id)} className="text-slate-400 hover:text-rose-500 shrink-0"><Trash2 size={16} /></button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function ExamsTab({ exams, setExams, apiKey }) {
+  const [form, setForm] = useState({ subject: "", date: "", time: "", room: "", notes: "" });
+  const [preview, setPreview] = useState(null);
+  const [scanning, setScanning] = useState(false);
+  const [scanError, setScanError] = useState(null);
+  const imageInputRef = useRef(null);
+
+  function addEntry(e) {
+    e.preventDefault();
+    if (!form.subject || !form.date) return;
+    setExams((prev) => [...prev, { ...form, id: genId() }]);
+    setForm({ subject: "", date: "", time: "", room: "", notes: "" });
+  }
+  function removeEntry(id) {
+    setExams((prev) => prev.filter((e) => e.id !== id));
+  }
+
+  async function handleImageFile(e) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setScanning(true);
+    setScanError(null);
+    setPreview(null);
+    try {
+      const rows = await extractFromImage(file, "exams", apiKey);
+      const cleaned = rows
+        .map((r) => ({
+          id: genId(),
+          include: true,
+          subject: r.subject || "",
+          date: /^\d{4}-\d{2}-\d{2}$/.test(r.date) ? r.date : "",
+          time: r.time || "",
+          room: r.room || "",
+          notes: r.notes || "",
+        }))
+        .filter((r) => r.subject);
+      if (cleaned.length === 0) setScanError("I couldn't find any exams in that image. Try a clearer photo, or enter them manually.");
+      else setPreview(cleaned);
+    } catch (err) {
+      setScanError(err?.message || "Something went wrong reading that image. Try again or enter exams manually.");
+    } finally {
+      setScanning(false);
+    }
+  }
+  function updatePreviewRow(i, patch) {
+    setPreview((prev) => prev.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+  }
+  function confirmPreview() {
+    const toAdd = preview.filter((r) => r.include && r.date && r.subject).map(({ id, include, ...rest }) => ({ ...rest, id: genId() }));
+    setExams((prev) => [...prev, ...toAdd]);
+    setPreview(null);
+  }
+
+  const sorted = [...exams].sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+
+  return (
+    <div className="max-w-2xl mx-auto space-y-6">
+      <SectionHeader icon={GraduationCap} title="Exam datesheet" subtitle="Add exam dates to get reminders as they approach" />
+
+      <Card>
+        <form onSubmit={addEntry} className="grid grid-cols-2 gap-2">
+          <div>
+            <label className="text-xs text-slate-500">Subject</label>
+            <input value={form.subject} onChange={(e) => setForm({ ...form, subject: e.target.value })} placeholder="Chemistry" className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
+          </div>
+          <div>
+            <label className="text-xs text-slate-500">Room</label>
+            <input value={form.room} onChange={(e) => setForm({ ...form, room: e.target.value })} placeholder="Hall A" className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
+          </div>
+          <div>
+            <label className="text-xs text-slate-500">Date</label>
+            <input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
+          </div>
+          <div>
+            <label className="text-xs text-slate-500">Time</label>
+            <input type="time" value={form.time} onChange={(e) => setForm({ ...form, time: e.target.value })} className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
+          </div>
+          <div className="col-span-2">
+            <label className="text-xs text-slate-500">Notes (optional)</label>
+            <input value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Chapters 1–5, bring calculator" className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm" />
+          </div>
+          <button type="submit" className="col-span-2 bg-amber-400 text-slate-900 font-semibold rounded-md py-2 text-sm flex items-center justify-center gap-1 hover:bg-amber-300">
+            <Plus size={16} /> Add exam
+          </button>
+        </form>
+      </Card>
+
+      <div className="flex items-center gap-3 flex-wrap">
+        <button
+          onClick={() => imageInputRef.current?.click()}
+          disabled={scanning}
+          className="flex items-center gap-2 text-sm border border-slate-300 rounded-md px-3 py-2 hover:bg-slate-100 disabled:opacity-60"
+        >
+          {scanning ? <Loader2 size={15} className="animate-spin" /> : <ScanLine size={15} />}
+          {scanning ? "Reading image..." : "Scan datesheet photo"}
+        </button>
+        <input ref={imageInputRef} type="file" accept="image/png,image/jpeg" onChange={handleImageFile} className="hidden" />
+        <span className="text-xs text-slate-400">Works with a photo or screenshot of a printed datesheet</span>
+      </div>
+
+      {scanError && (
+        <div className="flex items-start justify-between gap-2 bg-rose-50 border border-rose-200 text-rose-600 text-sm rounded-lg px-4 py-3">
+          <span>{scanError}</span>
+          <button onClick={() => setScanError(null)} className="shrink-0"><X size={14} /></button>
+        </div>
+      )}
+
+      {preview && preview.length > 0 && (
+        <Card>
+          <div className="flex items-center justify-between mb-3">
+            <p className="text-sm font-medium">Found {preview.length} exam{preview.length > 1 ? "s" : ""} — check the details before adding</p>
+            <button onClick={() => setPreview(null)} className="text-xs text-slate-400 hover:text-slate-600 shrink-0">Discard</button>
+          </div>
+          <div className="space-y-2">
+            {preview.map((r, i) => (
+              <div key={r.id} className="flex items-center gap-2 flex-wrap">
+                <input type="checkbox" checked={r.include} onChange={() => updatePreviewRow(i, { include: !r.include })} className="shrink-0" />
+                <input value={r.subject} onChange={(e) => updatePreviewRow(i, { subject: e.target.value })} placeholder="Subject" className="border border-slate-300 rounded px-1.5 py-1 text-xs flex-1 min-w-[90px]" />
+                <input
+                  type="date"
+                  value={r.date}
+                  onChange={(e) => updatePreviewRow(i, { date: e.target.value })}
+                  className={`border rounded px-1.5 py-1 text-xs w-32 shrink-0 ${r.date ? "border-slate-300" : "border-rose-300"}`}
+                />
+                <input type="time" value={r.time} onChange={(e) => updatePreviewRow(i, { time: e.target.value })} className="border border-slate-300 rounded px-1.5 py-1 text-xs w-24 shrink-0" />
+                <input value={r.room} onChange={(e) => updatePreviewRow(i, { room: e.target.value })} placeholder="Room" className="border border-slate-300 rounded px-1.5 py-1 text-xs w-20 shrink-0" />
+              </div>
+            ))}
+          </div>
+          <button onClick={confirmPreview} className="mt-3 w-full bg-amber-400 text-slate-900 font-semibold rounded-md py-2 text-sm hover:bg-amber-300">
+            Add {preview.filter((r) => r.include && r.date && r.subject).length} exam{preview.filter((r) => r.include && r.date && r.subject).length === 1 ? "" : "s"}
+          </button>
+        </Card>
+      )}
+
+      <div className="space-y-2">
+        {sorted.length === 0 && <p className="text-sm text-slate-400 text-center py-8">No exams added yet.</p>}
+        {sorted.map((ex) => (
+          <div key={ex.id} className="flex items-start gap-3 bg-white border border-slate-200 rounded-lg px-4 py-3">
+            <div className="flex-1 min-w-0">
+              <p className="font-medium text-sm">{ex.subject}</p>
+              <p className="text-xs text-slate-500">{formatDateReadable(ex.date)} · {formatTime12(ex.time)} · Room {ex.room || "TBA"}</p>
+              {ex.notes && <p className="text-xs text-slate-400 mt-1">{ex.notes}</p>}
+            </div>
+            <button onClick={() => removeEntry(ex.id)} className="text-slate-400 hover:text-rose-500 shrink-0"><Trash2 size={16} /></button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const rootEl = document.getElementById("root");
+ReactDOM.createRoot(rootEl).render(<App />);
+</script>
+</body>
+</html>

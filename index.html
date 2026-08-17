@@ -842,64 +842,105 @@ function geminiTimetableFilePart(file) {
   });
 }
 
-async function geminiTimetableRequest(parts, schema, apiKey, model = GEMINI_TIMETABLE_MODEL) {
-  if (!apiKey?.trim()) {
-    throw new Error("Add your Gemini API key in Settings first.");
-  }
+async function geminiTimetableRequest(
+    parts,
+    schema,
+    apiKey,
+    model = GEMINI_TIMETABLE_MODEL
+) {
+    const controller = new AbortController();
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), GEMINI_TIMETABLE_TIMEOUT);
-
-  try {
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-goog-api-key": apiKey.trim()
-        },
-        body: JSON.stringify({
-          contents: [{ role: "user", parts }],
-          generationConfig: {
-            responseMimeType: "application/json",
-            responseSchema: schema,
-            maxOutputTokens: 24000,
-            thinkingConfig: { thinkingLevel: "minimal" }
-          }
-        }),
-        signal: controller.signal
-      }
+    const timer = setTimeout(
+        () => controller.abort(),
+        GEMINI_TIMETABLE_TIMEOUT
     );
 
-    const raw = await response.text();
-    let data;
     try {
-      data = JSON.parse(raw);
-    } catch {
-      throw new Error("Gemini returned an invalid response.");
-    }
+        const response = await fetch(
+            "https://lucy-gemini-api.amritranabpt.workers.dev/",
+            {
+                method: "POST",
 
-    if (!response.ok) {
-      throw new Error(data?.error?.message || `Gemini request failed (${response.status}).`);
-    }
+                headers: {
+                    "Content-Type": "application/json"
+                },
 
-    const output = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("") || "";
-    if (!output) throw new Error("Gemini returned no timetable data.");
+                body: JSON.stringify({
+                    model: model,
 
-    try {
-      return JSON.parse(output);
-    } catch {
-      throw new Error("Gemini returned invalid JSON. Please try the timetable again.");
+                    contents: [
+                        {
+                            role: "user",
+                            parts: parts
+                        }
+                    ],
+
+                    generationConfig: {
+                        responseMimeType: "application/json",
+                        responseSchema: schema,
+                        maxOutputTokens: 24000,
+                        thinkingConfig: {
+                            thinkingLevel: "minimal"
+                        }
+                    }
+                }),
+
+                signal: controller.signal
+            }
+        );
+
+        const raw = await response.text();
+
+        let data;
+
+        try {
+            data = JSON.parse(raw);
+        } catch {
+            throw new Error(
+                "Gemini proxy returned an invalid response."
+            );
+        }
+
+        if (!response.ok) {
+            throw new Error(
+                data?.error?.message ||
+                data?.message ||
+                `Gemini request failed (${response.status}).`
+            );
+        }
+
+        const output =
+            data?.candidates?.[0]?.content?.parts
+                ?.map((p) => p.text || "")
+                .join("") || "";
+
+        if (!output) {
+            throw new Error(
+                "Gemini returned no timetable data."
+            );
+        }
+
+        try {
+            return JSON.parse(output);
+        } catch {
+            throw new Error(
+                "Gemini returned invalid JSON. Please try the timetable again."
+            );
+        }
+
+    } catch (e) {
+
+        if (e?.name === "AbortError") {
+            throw new Error(
+                "Gemini took longer than 75 seconds. Try the original PDF or a smaller clear timetable."
+            );
+        }
+
+        throw e;
+
+    } finally {
+        clearTimeout(timer);
     }
-  } catch (e) {
-    if (e?.name === "AbortError") {
-      throw new Error("Gemini took longer than 75 seconds. Try the original PDF or a smaller clear timetable image.");
-    }
-    throw e;
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 function geminiTimetableDiscoveryPrompt() {

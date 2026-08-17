@@ -1162,10 +1162,6 @@ function TimetableTab({ timetable, setTimetable, fileInputRef, handleCsvUpload }
           </label>
         </div>
 
-        <div className="rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm p-3">
-          Gemini is connected through Lucy's secure proxy. No Gemini API key is required here.
-        </div>
-
         {selectedFile && (
           <div className="text-xs text-slate-500 mt-3">
             Selected: <b>{selectedFile.name}</b> · {(selectedFile.size / 1024 / 1024).toFixed(2)} MB

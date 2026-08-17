@@ -281,7 +281,6 @@ function App() {
   const [, setTick] = useState(0);
   const [toasts, setToasts] = useState([]);
   const [apiKey, setApiKey] = useState(() => localStorage.getItem("lucy-api-key") || "");
-  const [geminiApiKey, setGeminiApiKey] = useState(() => localStorage.getItem("lucy-gemini-api-key") || "");
   const [showSettings, setShowSettings] = useState(false);
   const notifiedRef = useRef(new Set());
   const chatEndRef = useRef(null);
@@ -290,10 +289,6 @@ function App() {
   useEffect(() => {
     localStorage.setItem("lucy-api-key", apiKey);
   }, [apiKey]);
-
-  useEffect(() => {
-    localStorage.setItem("lucy-gemini-api-key", geminiApiKey);
-  }, [geminiApiKey]);
 
   // Load persisted data
   useEffect(() => {
@@ -614,39 +609,10 @@ function App() {
             </p>
 
             <div className="mt-4 pt-4 border-t border-slate-200">
-              <label className="text-xs text-slate-500">Gemini API key — timetable importer</label>
-              <input
-                type="password"
-                value={geminiApiKey}
-                onChange={(e) => setGeminiApiKey(e.target.value)}
-                placeholder="AIza..."
-                className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1"
-              />
+              <p className="text-xs text-slate-500 font-semibold">Gemini timetable importer</p>
               <p className="text-xs text-slate-400 mt-2">
-                Used only by the new PDF/photo timetable importer. Stored in this browser for testing.
+                Gemini is connected through Lucy's secure server-side proxy. You do not need to enter or store a Gemini API key in this browser.
               </p>
-              <button
-                onClick={async () => {
-                  if (!geminiApiKey.trim()) return;
-                  try {
-                    const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent", {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json", "x-goog-api-key": geminiApiKey.trim() },
-                      body: JSON.stringify({
-                        contents: [{ role: "user", parts: [{ text: "Reply with JSON only: {\"ok\":true}" }] }],
-                        generationConfig: { responseMimeType: "application/json", maxOutputTokens: 50 }
-                      })
-                    });
-                    if (!r.ok) throw new Error("Gemini key test failed");
-                    alert("Gemini API key works.");
-                  } catch (e) {
-                    alert(e?.message || "Could not connect to Gemini.");
-                  }
-                }}
-                className="mt-2 text-xs px-3 py-1.5 rounded-md bg-amber-400 text-slate-900 font-semibold"
-              >
-                Test Gemini key
-              </button>
             </div>
           </div>
         </div>
@@ -729,8 +695,6 @@ function App() {
               setTimetable={setTimetable}
               fileInputRef={fileInputRef}
               handleCsvUpload={handleCsvUpload}
-              apiKey={apiKey}
-              geminiApiKey={geminiApiKey}
             />
           )}
 
@@ -845,7 +809,6 @@ function geminiTimetableFilePart(file) {
 async function geminiTimetableRequest(
     parts,
     schema,
-    apiKey,
     model = GEMINI_TIMETABLE_MODEL
 ) {
     const controller = new AbortController();
@@ -997,19 +960,17 @@ function geminiNormalizeTime(value) {
   return `${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}`;
 }
 
-async function discoverGeminiTimetable(filePart, apiKey) {
+async function discoverGeminiTimetable(filePart) {
   try {
     return await geminiTimetableRequest(
       [filePart, { text: geminiTimetableDiscoveryPrompt() }],
-      GEMINI_DISCOVERY_SCHEMA,
-      apiKey
+      GEMINI_DISCOVERY_SCHEMA
     );
   } catch (e) {
     if (/404|not found|model/i.test(e.message || "")) {
       return await geminiTimetableRequest(
         [filePart, { text: geminiTimetableDiscoveryPrompt() }],
         GEMINI_DISCOVERY_SCHEMA,
-        apiKey,
         GEMINI_TIMETABLE_FALLBACK
       );
     }
@@ -1017,19 +978,17 @@ async function discoverGeminiTimetable(filePart, apiKey) {
   }
 }
 
-async function extractGeminiTimetable(filePart, apiKey, choice) {
+async function extractGeminiTimetable(filePart, choice) {
   try {
     return await geminiTimetableRequest(
       [filePart, { text: geminiTimetableExtractionPrompt(choice) }],
-      GEMINI_TIMETABLE_SCHEMA,
-      apiKey
+      GEMINI_TIMETABLE_SCHEMA
     );
   } catch (e) {
     if (/404|not found|model/i.test(e.message || "")) {
       return await geminiTimetableRequest(
         [filePart, { text: geminiTimetableExtractionPrompt(choice) }],
         GEMINI_TIMETABLE_SCHEMA,
-        apiKey,
         GEMINI_TIMETABLE_FALLBACK
       );
     }
@@ -1037,7 +996,7 @@ async function extractGeminiTimetable(filePart, apiKey, choice) {
   }
 }
 
-function TimetableTab({ timetable, setTimetable, fileInputRef, handleCsvUpload, apiKey, geminiApiKey }) {
+function TimetableTab({ timetable, setTimetable, fileInputRef, handleCsvUpload }) {
   const [form, setForm] = useState({ day: "Monday", start: "", end: "", subject: "", room: "", teacher: "" });
   const [formError, setFormError] = useState(null);
   const [preview, setPreview] = useState(null);
@@ -1077,11 +1036,6 @@ function TimetableTab({ timetable, setTimetable, fileInputRef, handleCsvUpload, 
     setImportStage("file");
     setChoices([]);
 
-    if (!geminiApiKey.trim()) {
-      setScanError("Add your Gemini API key in Settings first.");
-      return;
-    }
-
     setScanning(true);
     try {
       setImportInfo("Preparing the file…");
@@ -1089,7 +1043,7 @@ function TimetableTab({ timetable, setTimetable, fileInputRef, handleCsvUpload, 
       setFilePart(part);
 
       setImportInfo("Gemini is identifying the class/section names…");
-      const result = await discoverGeminiTimetable(part, geminiApiKey);
+      const result = await discoverGeminiTimetable(part);
       const found = (result?.classes || [])
         .filter((c) => c && c.class_name)
         .map((c) => ({
@@ -1123,7 +1077,7 @@ function TimetableTab({ timetable, setTimetable, fileInputRef, handleCsvUpload, 
     setImportInfo(`Gemini is reading ${choice.class_name}${choice.section ? ` — ${choice.section}` : ""}…`);
 
     try {
-      const result = await extractGeminiTimetable(filePart, geminiApiKey, choice);
+      const result = await extractGeminiTimetable(filePart, choice);
       const rows = (result?.entries || [])
         .map((r) => ({
           id: genId(),
@@ -1208,11 +1162,9 @@ function TimetableTab({ timetable, setTimetable, fileInputRef, handleCsvUpload, 
           </label>
         </div>
 
-        {!geminiApiKey.trim() && (
-          <div className="rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-sm p-3">
-            Add your Gemini API key in <b>Settings</b> before using the importer.
-          </div>
-        )}
+        <div className="rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm p-3">
+          Gemini is connected through Lucy's secure proxy. No Gemini API key is required here.
+        </div>
 
         {selectedFile && (
           <div className="text-xs text-slate-500 mt-3">

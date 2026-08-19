@@ -276,15 +276,10 @@ function App() {
     { id: genId(), sender: "bot", text: "I'll help you manage your timetable and classes.", time: new Date() },
   ]);
   const [input, setInput] = useState("");
-  const [notifPermission, setNotifPermission] = useState(
-    typeof Notification !== "undefined" ? Notification.permission : "unsupported"
-  );
   const [, setTick] = useState(0);
-  const [toasts, setToasts] = useState([]);
   const [apiKey, setApiKey] = useState(() => localStorage.getItem("lucy-api-key") || "");
   const [showSettings, setShowSettings] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const notifiedRef = useRef(new Set());
   const chatEndRef = useRef(null);
   const fileInputRef = useRef(null);
 
@@ -338,94 +333,6 @@ function App() {
   function addBotMessage(text) {
     setMessages((prev) => [...prev, { id: genId(), sender: "bot", text, time: new Date() }]);
   }
-  function fireNotification(title, body) {
-    if (typeof Notification !== "undefined" && Notification.permission === "granted") {
-      try { new Notification(title, { body }); } catch (e) {}
-    }
-  }
-  function pushToast(title, body) {
-    const id = genId();
-    setToasts((prev) => [...prev, { id, title, body }]);
-    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 8000);
-  }
-  function dismissToast(id) {
-    setToasts((prev) => prev.filter((t) => t.id !== id));
-  }
-  function alertUser(title, body, chatText) {
-    addBotMessage(chatText);
-    pushToast(title, body);
-    fireNotification(title, body);
-  }
-
-  // reminder engine
-  useEffect(() => {
-    if (!loaded) return;
-    function runCheck() {
-      const now = new Date();
-      const nowMinutes = now.getHours() * 60 + now.getMinutes();
-      const nowSeconds = now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
-      const dayName = DAYS[now.getDay()];
-      const today = todayStr();
-
-      timetable.forEach((e) => {
-        if (e.day !== dayName || !e.start) return;
-        const startSeconds = timeToMinutes(e.start) * 60;
-        const diffSeconds = startSeconds - nowSeconds;
-        const key = `class-${e.id}-${today}`;
-        if (diffSeconds <= 120 && diffSeconds > 0 && !notifiedRef.current.has(key)) {
-          notifiedRef.current.add(key);
-          const when = "in 2 min";
-          alertUser(
-            `${e.subject} starting soon`,
-            `Room ${e.room || "TBA"} • ${e.teacher || ""}`,
-            `Your next class is ${e.subject} in Room ${e.room || "TBA"} with ${e.teacher || "your teacher"} — starting ${when}.`
-          );
-        }
-      });
-
-      homework.forEach((h) => {
-        if (!h.dueDate) return;
-        const key = `hw-${h.id}-${today}`;
-        if (h.dueDate === today && !notifiedRef.current.has(key)) {
-          notifiedRef.current.add(key);
-          alertUser(
-            "Homework due today",
-            `${h.subject}: ${h.description}`,
-            `Reminder: ${h.subject} homework — "${h.description}" is due today.`
-          );
-        }
-      });
-
-      exams.forEach((ex) => {
-        if (!ex.date) return;
-        const examDate = new Date(ex.date + "T00:00:00");
-        const diffDays = Math.round((examDate - new Date(today + "T00:00:00")) / 86400000);
-        const key = `exam-${ex.id}-${today}`;
-        if (diffDays >= 0 && diffDays <= 3 && !notifiedRef.current.has(key)) {
-          notifiedRef.current.add(key);
-          const when = diffDays === 0 ? "today" : diffDays === 1 ? "tomorrow" : `in ${diffDays} days`;
-          alertUser(
-            `Upcoming exam: ${ex.subject}`,
-            `${when} • Room ${ex.room || "TBA"}`,
-            `Exam alert: ${ex.subject} exam is ${when} (${formatDateReadable(ex.date)}) in Room ${ex.room || "TBA"}.`
-          );
-        }
-      });
-    }
-    runCheck();
-    const id = setInterval(runCheck, 20000);
-    return () => clearInterval(id);
-  }, [timetable, homework, exams, loaded]);
-
-  async function requestNotifPermission() {
-    if (typeof Notification === "undefined") return;
-    const p = await Notification.requestPermission();
-    setNotifPermission(p);
-    if (p === "granted") {
-      pushToast("Notifications enabled", "Lucy will remind you about classes 2 minutes before they start. Background push notifications require the Lucy push service to be configured.");
-    }
-  }
-
   function getLiveClassInfo(now = new Date()) {
     const dayName = DAYS[now.getDay()];
     const nowMinutes = now.getHours() * 60 + now.getMinutes();
@@ -574,26 +481,21 @@ function App() {
         .toast-anim { animation: toast-in 0.25s ease-out; }
       `}</style>
 
-      {/* Alert toasts */}
-      <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 w-72 max-w-[85vw]">
-        {toasts.map((t) => (
-          <div key={t.id} className="toast-anim bg-slate-900 text-white rounded-xl shadow-lg px-4 py-3 flex items-start gap-2">
-            <BellRing size={16} className="text-amber-400 shrink-0 mt-0.5" />
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-semibold truncate">{t.title}</p>
-              {t.body && <p className="text-xs text-slate-300 mt-0.5">{t.body}</p>}
-            </div>
-            <button onClick={() => dismissToast(t.id)} className="text-slate-400 hover:text-white shrink-0"><X size={14} /></button>
-          </div>
-        ))}
-      </div>
-
       {/* Sidebar / mobile menu */}
       {sidebarOpen && <div className="fixed inset-0 bg-black/40 z-40 md:hidden" onClick={() => setSidebarOpen(false)} />}
       <div className={`fixed inset-y-0 left-0 z-50 w-64 md:w-56 bg-slate-900 text-slate-200 flex flex-col shrink-0 transform transition-transform duration-200 ${sidebarOpen ? "translate-x-0" : "-translate-x-full"}`}>
-        <div className="flex items-center gap-2 px-3 md:px-5 py-5 border-b border-slate-800">
-          <School size={22} className="text-amber-400 shrink-0" />
-          <span className="font-display font-bold text-lg text-white">Lucy</span>
+        <div className="flex items-center justify-between gap-2 px-3 md:px-5 py-5 border-b border-slate-800">
+          <div className="flex items-center gap-2 min-w-0">
+            <School size={22} className="text-amber-400 shrink-0" />
+            <span className="font-display font-bold text-lg text-white">Lucy</span>
+          </div>
+          <button
+            onClick={() => setSidebarOpen(false)}
+            className="w-9 h-9 rounded-lg text-slate-300 hover:bg-slate-800 hover:text-white flex items-center justify-center shrink-0"
+            aria-label="Close menu"
+          >
+            <X size={20} />
+          </button>
         </div>
         <nav className="flex flex-col gap-1 p-2 md:p-3">
           {TABS.map((t) => {
@@ -614,23 +516,6 @@ function App() {
           })}
         </nav>
         <div className="mt-auto p-2 md:p-3 flex flex-col gap-1">
-          <button
-            onClick={requestNotifPermission}
-            disabled={notifPermission === "granted" || notifPermission === "unsupported"}
-            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs text-slate-300 hover:bg-slate-800 disabled:opacity-60"
-          >
-            {notifPermission === "granted" ? <BellRing size={16} className="text-amber-400 shrink-0" /> : <BellOff size={16} className="shrink-0" />}
-            <span className="hidden md:inline">
-              {notifPermission === "granted" ? "Notifications on" : notifPermission === "unsupported" ? "Notifications unavailable" : "Enable notifications"}
-            </span>
-          </button>
-          <button
-            onClick={() => alertUser("Test alert", "This is what a Lucy reminder looks like.", "Just testing — this is what a reminder from me looks like.")}
-            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs text-slate-300 hover:bg-slate-800"
-          >
-            <Bell size={16} className="shrink-0" />
-            <span>Send test alert</span>
-          </button>
           <button
             onClick={() => setShowSettings(true)}
             className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs text-slate-300 hover:bg-slate-800"
@@ -672,13 +557,15 @@ function App() {
 
       {/* Main */}
       <div className={`min-h-screen flex flex-col min-w-0 transition-all duration-200 ${sidebarOpen ? "md:ml-56" : "ml-0"}`}>
-        <button
-          onClick={() => setSidebarOpen((v) => !v)}
-          className={`fixed top-4 z-[60] w-10 h-10 rounded-xl bg-slate-900 text-white shadow-lg flex items-center justify-center text-xl transition-all duration-200 ${sidebarOpen ? "left-4 md:left-[15.5rem]" : "left-4"}`}
-          aria-label="Open menu"
-        >
-          {sidebarOpen ? "×" : "☰"}
-        </button>
+        {!sidebarOpen && (
+          <button
+            onClick={() => setSidebarOpen(true)}
+            className="fixed top-4 left-4 z-[60] w-11 h-11 rounded-xl bg-slate-900 text-white shadow-lg flex items-center justify-center text-xl hover:bg-slate-800"
+            aria-label="Open menu"
+          >
+            ☰
+          </button>
+        )}
 
         {/* Next up strip */}
         <div className="bg-slate-900 text-white px-4 md:px-8 py-3 flex items-center gap-3 shrink-0">
@@ -699,6 +586,7 @@ function App() {
 
         {loaded && (() => {
           const live = getLiveClassInfo(new Date());
+          if (live.type !== "current" && live.type !== "next") return null;
           const pct = live.type === "current"
             ? Math.min(100, Math.max(0, ((timeToMinutes(live.entry.end) - (new Date().getHours() * 60 + new Date().getMinutes())) / Math.max(1, timeToMinutes(live.entry.end) - timeToMinutes(live.entry.start))) * 100))
             : 0;
@@ -730,9 +618,7 @@ function App() {
                     </div>
                     <div className="text-right"><p className="text-xl font-bold font-mono-c text-slate-900">{live.until} min</p><p className="text-[11px] text-slate-400">until start</p></div>
                   </div>
-                ) : (
-                  <div><p className="text-[11px] uppercase tracking-wider font-bold text-slate-500">🌙 No more classes today</p><h2 className="font-display font-bold text-lg text-slate-900 mt-1">You're done for today 🎉</h2></div>
-                )}
+                ) : null}
               </div>
             </div>
           );
@@ -1525,9 +1411,12 @@ const GEMINI_EXAM_SCHEMA = {
           date: { type: "string" },
           time: { type: "string" },
           room: { type: "string" },
-          notes: { type: "string" }
+          notes: { type: "string" },
+          semester: { type: "string" },
+          course: { type: "string" },
+          branch: { type: "string" }
         },
-        required: ["subject", "date", "time", "room", "notes"]
+        required: ["subject", "date", "time", "room", "notes", "semester", "course", "branch"]
       }
     }
   },
@@ -1537,24 +1426,27 @@ const GEMINI_EXAM_SCHEMA = {
 const GEMINI_EXAM_FILTER_SCHEMA = {
   type: "object",
   properties: {
-    years: { type: "array", items: { type: "string" } },
+    semesters: { type: "array", items: { type: "string" } },
     courses: { type: "array", items: { type: "string" } },
     branches: { type: "array", items: { type: "string" } }
   },
-  required: ["years", "courses", "branches"]
+  required: ["semesters", "courses", "branches"]
 };
 
 function geminiExamFilterPrompt() {
   return `
-Inspect this college-wide exam datesheet and identify the academic filters visibly present in it.
-Return ONLY JSON in this shape: {"years":[],"courses":[],"branches":[]}
+Inspect the ENTIRE uploaded college-wide exam datesheet and identify the academic filters that are actually printed anywhere in the document.
+Return ONLY JSON in this shape: {"semesters":[],"courses":[],"branches":[]}
+
 Rules:
-- years: academic year/year of study such as 1st Year, 2nd Year, 3rd Year, 4th Year, or printed equivalents.
-- courses: degree/program names such as B.Tech, M.Tech, MBA, BCA, etc.
-- branches: branch/specialization names such as CSE, ECE, IT, ME, AI/ML, etc.
-- Return only values actually printed or clearly inferable from headings in the uploaded datesheet.
-- Do not invent options.
-- If a category is not explicitly separated, return an empty array for that category.
+- semesters: find semester labels such as 1st Semester, 2nd Semester, Sem 1, Sem 2, I Sem, II Sem, odd/even semester, or equivalent printed labels.
+- courses: find degree/program names such as B.Tech, M.Tech, MBA, BCA, etc.
+- branches: find branch/specialization names such as CSE, ECE, IT, ME, AI/ML, Artificial Intelligence and Machine Learning, etc.
+- Scan all pages and all section headings; do not stop after the first page.
+- Return each distinct printed value only once.
+- Preserve the wording used in the document where possible.
+- Do not return academic years like 2025-26 as semesters.
+- Do not invent options. If a category is not separated in the document, return an empty array.
 `;
 }
 
@@ -1579,16 +1471,19 @@ async function discoverGeminiExamFilters(file) {
 
 function geminiExamPrompt(filters = {}) {
   const today = todayStr();
-  const year = new Date().getFullYear();
+  const currentYear = new Date().getFullYear();
   return `
-You are reading a college-wide exam datesheet, examination schedule, date sheet, or timetable.
-The student selection is:
-- Semester: ${filters.year || "ALL"}
+You are reading a college-wide exam datesheet. The document may contain many semesters, courses and branches.
+
+STUDENT SELECTION:
+- Semester: ${filters.semester || "ALL"}
 - Course: ${filters.course || "ALL"}
 - Branch: ${filters.branch || "ALL"}
 
-Extract ONLY the exams belonging to the selected student profile. If a row is common to all students in the selected profile, include it. Exclude rows belonging to other years, courses, or branches.
-Extract EVERY matching exam visible in the uploaded PDF/photo.
+Your job is to scan the ENTIRE uploaded PDF/image and return ONLY exams that belong to the selected combination.
+Do not use position alone to decide ownership. Read the heading, column, row, section, course and branch labels that govern each exam.
+If an exam is common to all students in the selected combination, include it.
+If an exam belongs to another semester/course/branch, exclude it.
 
 Return JSON only in exactly this shape:
 {
@@ -1598,24 +1493,28 @@ Return JSON only in exactly this shape:
       "date": "YYYY-MM-DD",
       "time": "HH:MM",
       "room": "",
-      "notes": ""
+      "notes": "",
+      "semester": "",
+      "course": "",
+      "branch": ""
     }
   ]
 }
 
 Rules:
-- Read the actual uploaded file. Never use saved or hardcoded data.
-- Extract every visible exam, not just the first few.
-- Use the printed exam subject/name.
-- Convert dates to YYYY-MM-DD.
-- If no year is printed, assume ${year}, unless the month has clearly already passed this year, then use ${year + 1}.
+- Scan every page, every table and every relevant heading. Never stop after the first few exams.
+- For EVERY returned exam, copy the semester/course/branch that governs that exam into the metadata fields.
+- If the selected filter is printed in a heading and applies to multiple rows, apply that heading to each row.
+- If a row is common, use the selected value in the metadata field when appropriate.
+- Do not mix neighboring semester/branch blocks.
+- Use the printed subject/paper name.
+- Convert dates to YYYY-MM-DD. If no year is printed, assume ${currentYear}, unless the month has clearly already passed this year, then use ${currentYear + 1}.
 - Today's date is ${today}.
-- Convert exam times to 24-hour HH:MM. If the time is missing or unreadable, use an empty string.
-- Keep room/center information separate from notes.
-- Put extra printed details such as semester, paper code, reporting time, instructions, or syllabus information in notes.
-- Do not invent missing information; use empty strings.
-- If the file is not an exam datesheet or no exams can be read, return {"exams":[]}.
-- Return JSON only. No markdown, no explanation.
+- Convert exam times to 24-hour HH:MM. If unreadable, use an empty string.
+- Keep room/center separate from notes.
+- Put paper code and other useful printed details in notes.
+- Never invent an exam.
+- If no matching exams exist, return {"exams":[]}.
 `;
 }
 
@@ -1644,7 +1543,7 @@ function ExamsTab({ exams, setExams }) {
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState(null);
   const [filterChoices, setFilterChoices] = useState(null);
-  const [filters, setFilters] = useState({ Semester: "", course: "", branch: "" });
+  const [filters, setFilters] = useState({ semester: "", course: "", branch: "" });
   const imageInputRef = useRef(null);
 
   function addEntry(e) {
@@ -1671,18 +1570,18 @@ function ExamsTab({ exams, setExams }) {
     try {
       setScanning(true);
       const choices = await discoverGeminiExamFilters(file);
-      const years = Array.isArray(choices?.years) ? choices.years.map(String).filter(Boolean) : [];
+      const semesters = Array.isArray(choices?.semesters) ? choices.semesters.map(String).filter(Boolean) : [];
       const courses = Array.isArray(choices?.courses) ? choices.courses.map(String).filter(Boolean) : [];
       const branches = Array.isArray(choices?.branches) ? choices.branches.map(String).filter(Boolean) : [];
 
-      setFilterChoices({ file, years, courses, branches });
+      setFilterChoices({ file, semesters, courses, branches });
       setFilters({
-        Semester: years.length === 1 ? years[0] : "",
+        semester: semesters.length === 1 ? semesters[0] : "",
         course: courses.length === 1 ? courses[0] : "",
         branch: branches.length === 1 ? branches[0] : ""
       });
     } catch (err) {
-      setScanError(err?.message || "Could not identify the year/course/branch in that datesheet.");
+      setScanError(err?.message || "Could not identify the semester/course/branch in that datesheet.");
     } finally {
       setScanning(false);
     }
@@ -1690,8 +1589,8 @@ function ExamsTab({ exams, setExams }) {
 
   async function readFilteredDatesheet() {
     if (!filterChoices?.file) return;
-    if ((filterChoices.years.length > 0 && !filters.year) || (filterChoices.courses.length > 0 && !filters.course) || (filterChoices.branches.length > 0 && !filters.branch)) {
-      setScanError("Please select your year, course and branch before reading the datesheet.");
+    if ((filterChoices.semesters.length > 0 && !filters.semester) || (filterChoices.courses.length > 0 && !filters.course) || (filterChoices.branches.length > 0 && !filters.branch)) {
+      setScanError("Please select your semester, course and branch before reading the datesheet.");
       return;
     }
 
@@ -1699,16 +1598,28 @@ function ExamsTab({ exams, setExams }) {
     setScanError(null);
     try {
       const rows = await extractGeminiExams(filterChoices.file, filters);
+      const normalizeLabel = (v) => String(v || "").toLowerCase().replace(/[–—-]/g, " ").replace(/[^a-z0-9]+/g, " ").trim();
+      const selectedSemester = normalizeLabel(filters.semester);
+      const selectedCourse = normalizeLabel(filters.course);
+      const selectedBranch = normalizeLabel(filters.branch);
+      const matches = (actual, selected) => {
+        if (!selected) return true;
+        const a = normalizeLabel(actual);
+        return a === selected || a.includes(selected) || selected.includes(a);
+      };
+
       const cleaned = (rows?.exams || [])
         .map((r) => ({
           id: genId(), include: true,
           subject: String(r.subject || "").trim(),
           date: /^\d{4}-\d{2}-\d{2}$/.test(String(r.date || "")) ? String(r.date) : "",
-          time: geminiNormalizeTime(r.time), room: String(r.room || "").trim(), notes: String(r.notes || "").trim()
+          time: geminiNormalizeTime(r.time), room: String(r.room || "").trim(), notes: String(r.notes || "").trim(),
+          semester: String(r.semester || "").trim(), course: String(r.course || "").trim(), branch: String(r.branch || "").trim()
         }))
-        .filter((r) => r.subject);
+        .filter((r) => r.subject)
+        .filter((r) => matches(r.semester, selectedSemester) && matches(r.course, selectedCourse) && matches(r.branch, selectedBranch));
 
-      if (!cleaned.length) setScanError("Gemini couldn't find exams for that year/course/branch. Check your selections and try again.");
+      if (!cleaned.length) setScanError("Gemini couldn't find exams for that semester/course/branch. Check your selections and try again.");
       else { setPreview(cleaned); setFilterChoices(null); }
     } catch (err) {
       setScanError(err?.message || "Something went wrong reading that datesheet. Try again.");
@@ -1732,7 +1643,7 @@ function ExamsTab({ exams, setExams }) {
 
   return (
     <div className="max-w-2xl mx-auto space-y-6">
-      <SectionHeader icon={GraduationCap} title="Exam datesheet" subtitle="Upload the college-wide datesheet and Lucy will ask your year, course and branch before importing your exams." />
+      <SectionHeader icon={GraduationCap} title="Exam datesheet" subtitle="Upload the college-wide datesheet and Lucy will ask your semester, course and branch before importing your exams." />
 
       <Card>
         <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
@@ -1750,7 +1661,7 @@ function ExamsTab({ exams, setExams }) {
         {filterChoices && (
           <div className="border-t border-slate-200 pt-4 space-y-3">
             <p className="text-sm font-semibold text-slate-900">Tell Lucy which student profile is yours</p>
-            {[["year", "Year", filterChoices.years], ["course", "Course", filterChoices.courses], ["branch", "Branch", filterChoices.branches]].map(([key, label, options]) => (
+            {[["semester", "Semester", filterChoices.semesters], ["course", "Course", filterChoices.courses], ["branch", "Branch", filterChoices.branches]].map(([key, label, options]) => (
               <div key={key}>
                 <label className="text-xs text-slate-500">{label}</label>
                 <select value={filters[key]} onChange={(e) => setFilters((f) => ({ ...f, [key]: e.target.value }))} className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">

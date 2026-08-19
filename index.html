@@ -15,16 +15,8 @@
 </style>
 </head>
 <body>
-<link rel="manifest" href="manifest.webmanifest" />
 <meta name="theme-color" content="#0f172a" />
 <div id="root"></div>
-<script>
-if ("serviceWorker" in navigator) {
-  window.addEventListener("load", () => {
-    navigator.serviceWorker.register("./sw.js").catch(err => console.warn("Lucy service worker registration failed", err));
-  });
-}
-</script>
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useRef } = React;
 const Papa = window.Papa;
@@ -1030,7 +1022,7 @@ Return JSON only.
 
 function geminiTimetableExtractionPrompt(choice, selectedGroup) {
   const groupRule = selectedGroup && selectedGroup !== "ALL"
-    ? `The student is in GROUP ${selectedGroup}. If the timetable contains multiple groups (for example G1/G2, A/B, Group 1/Group 2), include ONLY the sessions belonging to GROUP ${selectedGroup}. Do not include the other group's sessions. If a common class is shared by all groups, include it. Keep the actual group label in the group field.`
+    ? `The student is in GROUP ${selectedGroup}. When a timetable has Group 1/Group 2 (or G1/G2/A/B) columns, preserve the group exactly and exclude the other group after the user selects their group. If the timetable contains multiple groups (for example G1/G2, A/B, Group 1/Group 2), include ONLY the sessions belonging to GROUP ${selectedGroup}. Do not include the other group's sessions. If a common class is shared by all groups, include it. Keep the actual group label in the group field.`
     : "If the timetable contains group-specific sessions, preserve the actual group label in the group field and include common sessions.";
   return `
 Extract the complete timetable for ONLY this selected timetable:
@@ -1591,7 +1583,7 @@ function geminiExamPrompt(filters = {}) {
   return `
 You are reading a college-wide exam datesheet, examination schedule, date sheet, or timetable.
 The student selection is:
-- Year: ${filters.year || "ALL"}
+- Semester: ${filters.year || "ALL"}
 - Course: ${filters.course || "ALL"}
 - Branch: ${filters.branch || "ALL"}
 
@@ -1652,7 +1644,7 @@ function ExamsTab({ exams, setExams }) {
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState(null);
   const [filterChoices, setFilterChoices] = useState(null);
-  const [filters, setFilters] = useState({ year: "", course: "", branch: "" });
+  const [filters, setFilters] = useState({ Semester: "", course: "", branch: "" });
   const imageInputRef = useRef(null);
 
   function addEntry(e) {
@@ -1685,7 +1677,7 @@ function ExamsTab({ exams, setExams }) {
 
       setFilterChoices({ file, years, courses, branches });
       setFilters({
-        year: years.length === 1 ? years[0] : "",
+        Semester: years.length === 1 ? years[0] : "",
         course: courses.length === 1 ? courses[0] : "",
         branch: branches.length === 1 ? branches[0] : ""
       });

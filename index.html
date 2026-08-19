@@ -702,7 +702,7 @@ function App() {
             <HomeworkTab homework={homework} setHomework={setHomework} subjects={[...new Set(timetable.map((e) => e.subject))]} />
           )}
 
-          {tab === "exams" && <ExamsTab exams={exams} setExams={setExams} apiKey={apiKey} />}
+          {tab === "exams" && <ExamsTab exams={exams} setExams={setExams} />}
         </div>
       </div>
     </div>
@@ -1393,7 +1393,83 @@ function HomeworkTab({ homework, setHomework, subjects }) {
   );
 }
 
-function ExamsTab({ exams, setExams, apiKey }) {
+const GEMINI_EXAM_SCHEMA = {
+  type: "object",
+  properties: {
+    exams: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          subject: { type: "string" },
+          date: { type: "string" },
+          time: { type: "string" },
+          room: { type: "string" },
+          notes: { type: "string" }
+        },
+        required: ["subject", "date", "time", "room", "notes"]
+      }
+    }
+  },
+  required: ["exams"]
+};
+
+function geminiExamPrompt() {
+  const today = todayStr();
+  const year = new Date().getFullYear();
+  return `
+You are reading an exam datesheet, examination schedule, date sheet, or timetable.
+Extract EVERY exam visible in the uploaded PDF/photo.
+
+Return JSON only in exactly this shape:
+{
+  "exams": [
+    {
+      "subject": "",
+      "date": "YYYY-MM-DD",
+      "time": "HH:MM",
+      "room": "",
+      "notes": ""
+    }
+  ]
+}
+
+Rules:
+- Read the actual uploaded file. Never use saved or hardcoded data.
+- Extract every visible exam, not just the first few.
+- Use the printed exam subject/name.
+- Convert dates to YYYY-MM-DD.
+- If no year is printed, assume ${year}, unless the month has clearly already passed this year, then use ${year + 1}.
+- Today's date is ${today}.
+- Convert exam times to 24-hour HH:MM. If the time is missing or unreadable, use an empty string.
+- Keep room/center information separate from notes.
+- Put extra printed details such as semester, paper code, reporting time, instructions, or syllabus information in notes.
+- Do not invent missing information; use empty strings.
+- If the file is not an exam datesheet or no exams can be read, return {"exams":[]}.
+- Return JSON only. No markdown, no explanation.
+`;
+}
+
+async function extractGeminiExams(file) {
+  const filePart = await geminiTimetableFilePart(file);
+  try {
+    return await geminiTimetableRequest(
+      [filePart, { text: geminiExamPrompt() }],
+      GEMINI_EXAM_SCHEMA
+    );
+  } catch (e) {
+    if (/404|not found|model/i.test(e.message || "")) {
+      return await geminiTimetableRequest(
+        [filePart, { text: geminiExamPrompt() }],
+        GEMINI_EXAM_SCHEMA,
+        GEMINI_TIMETABLE_FALLBACK
+      );
+    }
+    throw e;
+  }
+}
+
+function ExamsTab({ exams, setExams }) {
   const [form, setForm] = useState({ subject: "", date: "", time: "", room: "", notes: "" });
   const [preview, setPreview] = useState(null);
   const [scanning, setScanning] = useState(false);
@@ -1406,6 +1482,7 @@ function ExamsTab({ exams, setExams, apiKey }) {
     setExams((prev) => [...prev, { ...form, id: genId() }]);
     setForm({ subject: "", date: "", time: "", room: "", notes: "" });
   }
+
   function removeEntry(id) {
     setExams((prev) => prev.filter((e) => e.id !== id));
   }
@@ -1414,44 +1491,102 @@ function ExamsTab({ exams, setExams, apiKey }) {
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file) return;
+
     setScanning(true);
     setScanError(null);
     setPreview(null);
+
     try {
-      const rows = await extractFromImage(file, "exams", apiKey);
-      const cleaned = rows
+      const rows = await extractGeminiExams(file);
+      const cleaned = (rows?.exams || [])
         .map((r) => ({
           id: genId(),
           include: true,
-          subject: r.subject || "",
-          date: /^\d{4}-\d{2}-\d{2}$/.test(r.date) ? r.date : "",
-          time: r.time || "",
-          room: r.room || "",
-          notes: r.notes || "",
+          subject: String(r.subject || "").trim(),
+          date: /^\d{4}-\d{2}-\d{2}$/.test(String(r.date || "")) ? String(r.date) : "",
+          time: geminiNormalizeTime(r.time),
+          room: String(r.room || "").trim(),
+          notes: String(r.notes || "").trim()
         }))
         .filter((r) => r.subject);
-      if (cleaned.length === 0) setScanError("I couldn't find any exams in that image. Try a clearer photo, or enter them manually.");
-      else setPreview(cleaned);
+
+      if (cleaned.length === 0) {
+        setScanError("Gemini couldn't find any exams in that file. Try a clearer datesheet.");
+      } else {
+        setPreview(cleaned);
+      }
     } catch (err) {
-      setScanError(err?.message || "Something went wrong reading that image. Try again or enter exams manually.");
+      setScanError(err?.message || "Something went wrong reading that datesheet. Try again.");
     } finally {
       setScanning(false);
     }
   }
+
   function updatePreviewRow(i, patch) {
     setPreview((prev) => prev.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
   }
+
   function confirmPreview() {
-    const toAdd = preview.filter((r) => r.include && r.date && r.subject).map(({ id, include, ...rest }) => ({ ...rest, id: genId() }));
+    const toAdd = (preview || [])
+      .filter((r) => r.include && r.date && r.subject)
+      .map(({ id, include, ...rest }) => ({ ...rest, id: genId() }));
+
+    if (!toAdd.length) {
+      setScanError("There are no valid selected exams to add.");
+      return;
+    }
+
     setExams((prev) => [...prev, ...toAdd]);
     setPreview(null);
+    setScanError(null);
   }
 
   const sorted = [...exams].sort((a, b) => (a.date || "").localeCompare(b.date || ""));
 
   return (
     <div className="max-w-2xl mx-auto space-y-6">
-      <SectionHeader icon={GraduationCap} title="Exam datesheet" subtitle="Add exam dates to get reminders as they approach" />
+      <SectionHeader
+        icon={GraduationCap}
+        title="Exam datesheet"
+        subtitle="Add exams manually, or let Gemini read a PDF/photo and preview the results before saving"
+      />
+
+      <Card>
+        <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
+          <div>
+            <h3 className="font-display font-bold text-slate-900">🤖 Gemini datesheet importer</h3>
+            <p className="text-xs text-slate-500 mt-1">
+              Upload the original PDF when possible. Gemini extracts every visible exam, date, time, room and notes.
+            </p>
+          </div>
+          <button
+            onClick={() => imageInputRef.current?.click()}
+            disabled={scanning}
+            className="flex items-center gap-2 bg-amber-400 text-slate-900 font-semibold rounded-lg px-4 py-2 text-sm hover:bg-amber-300 disabled:opacity-60"
+          >
+            {scanning ? <Loader2 size={15} className="animate-spin" /> : <Upload size={15} />}
+            {scanning ? "Reading datesheet..." : "📄 Upload datesheet"}
+          </button>
+          <input
+            ref={imageInputRef}
+            type="file"
+            accept=".pdf,.jpg,.jpeg,.png,.webp,application/pdf,image/jpeg,image/png,image/webp"
+            onChange={handleImageFile}
+            className="hidden"
+          />
+        </div>
+
+        <div className="rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs p-3">
+          🔒 Gemini is connected through Lucy's secure proxy. No Gemini API key is stored in this browser.
+        </div>
+
+        {scanError && (
+          <div className="mt-3 flex items-start justify-between gap-2 bg-rose-50 border border-rose-200 text-rose-600 text-sm rounded-lg px-4 py-3">
+            <span>{scanError}</span>
+            <button onClick={() => setScanError(null)} className="shrink-0"><X size={14} /></button>
+          </div>
+        )}
+      </Card>
 
       <Card>
         <form onSubmit={addEntry} className="grid grid-cols-2 gap-2">
@@ -1481,48 +1616,26 @@ function ExamsTab({ exams, setExams, apiKey }) {
         </form>
       </Card>
 
-      <div className="flex items-center gap-3 flex-wrap">
-        <button
-          onClick={() => imageInputRef.current?.click()}
-          disabled={scanning}
-          className="flex items-center gap-2 text-sm border border-slate-300 rounded-md px-3 py-2 hover:bg-slate-100 disabled:opacity-60"
-        >
-          {scanning ? <Loader2 size={15} className="animate-spin" /> : <ScanLine size={15} />}
-          {scanning ? "Reading image..." : "Scan datesheet photo"}
-        </button>
-        <input ref={imageInputRef} type="file" accept="image/png,image/jpeg" onChange={handleImageFile} className="hidden" />
-        <span className="text-xs text-slate-400">Works with a photo or screenshot of a printed datesheet</span>
-      </div>
-
-      {scanError && (
-        <div className="flex items-start justify-between gap-2 bg-rose-50 border border-rose-200 text-rose-600 text-sm rounded-lg px-4 py-3">
-          <span>{scanError}</span>
-          <button onClick={() => setScanError(null)} className="shrink-0"><X size={14} /></button>
-        </div>
-      )}
-
       {preview && preview.length > 0 && (
         <Card>
           <div className="flex items-center justify-between mb-3">
             <p className="text-sm font-medium">Found {preview.length} exam{preview.length > 1 ? "s" : ""} — check the details before adding</p>
             <button onClick={() => setPreview(null)} className="text-xs text-slate-400 hover:text-slate-600 shrink-0">Discard</button>
           </div>
+
           <div className="space-y-2">
             {preview.map((r, i) => (
-              <div key={r.id} className="flex items-center gap-2 flex-wrap">
+              <div key={r.id} className="flex items-center gap-2 flex-wrap border-b border-slate-100 pb-2">
                 <input type="checkbox" checked={r.include} onChange={() => updatePreviewRow(i, { include: !r.include })} className="shrink-0" />
-                <input value={r.subject} onChange={(e) => updatePreviewRow(i, { subject: e.target.value })} placeholder="Subject" className="border border-slate-300 rounded px-1.5 py-1 text-xs flex-1 min-w-[90px]" />
-                <input
-                  type="date"
-                  value={r.date}
-                  onChange={(e) => updatePreviewRow(i, { date: e.target.value })}
-                  className={`border rounded px-1.5 py-1 text-xs w-32 shrink-0 ${r.date ? "border-slate-300" : "border-rose-300"}`}
-                />
+                <input value={r.subject} onChange={(e) => updatePreviewRow(i, { subject: e.target.value })} placeholder="Subject" className="border border-slate-300 rounded px-1.5 py-1 text-xs flex-1 min-w-[110px]" />
+                <input type="date" value={r.date} onChange={(e) => updatePreviewRow(i, { date: e.target.value })} className={`border rounded px-1.5 py-1 text-xs w-32 shrink-0 ${r.date ? "border-slate-300" : "border-rose-300"}`} />
                 <input type="time" value={r.time} onChange={(e) => updatePreviewRow(i, { time: e.target.value })} className="border border-slate-300 rounded px-1.5 py-1 text-xs w-24 shrink-0" />
                 <input value={r.room} onChange={(e) => updatePreviewRow(i, { room: e.target.value })} placeholder="Room" className="border border-slate-300 rounded px-1.5 py-1 text-xs w-20 shrink-0" />
+                <input value={r.notes} onChange={(e) => updatePreviewRow(i, { notes: e.target.value })} placeholder="Notes" className="border border-slate-300 rounded px-1.5 py-1 text-xs flex-1 min-w-[120px]" />
               </div>
             ))}
           </div>
+
           <button onClick={confirmPreview} className="mt-3 w-full bg-amber-400 text-slate-900 font-semibold rounded-md py-2 text-sm hover:bg-amber-300">
             Add {preview.filter((r) => r.include && r.date && r.subject).length} exam{preview.filter((r) => r.include && r.date && r.subject).length === 1 ? "" : "s"}
           </button>

@@ -624,10 +624,10 @@ function App() {
           );
         })()}
 
-        <div className="flex-1 overflow-y-auto p-4 md:p-8">
+        <div className={`flex-1 min-h-0 p-4 md:p-8 ${tab === "chat" ? "overflow-hidden" : "overflow-y-auto"}`}>
           {tab === "chat" && (
-            <div className="max-w-2xl mx-auto flex flex-col h-full min-h-0">
-              <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-3 pb-4">
+            <div className="max-w-2xl mx-auto flex flex-col h-full min-h-0 relative">
+              <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-3 pb-24">
                 {messages.map((m) => (
                   <div key={m.id} className={`flex ${m.sender === "user" ? "justify-end" : "justify-start"}`}>
                     <div
@@ -652,7 +652,7 @@ function App() {
                   </button>
                 ))}
               </div>
-              <div className="flex gap-2 bg-stone-50 pt-2">
+              <div className="absolute bottom-0 left-0 right-0 flex gap-2 bg-stone-50 pt-2 pb-1">
                 <input
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
@@ -710,6 +710,9 @@ function SectionHeader({ icon: Icon, title, subtitle }) {
 const GEMINI_TIMETABLE_MODEL = "gemini-3.5-flash-lite";
 const GEMINI_TIMETABLE_FALLBACK = "gemini-3.6-flash";
 const GEMINI_TIMETABLE_TIMEOUT = 75000;
+const GEMINI_EXAM_MODEL = "gemini-3.7-flash";
+const GEMINI_EXAM_FALLBACK = "gemini-3.6-flash";
+const GEMINI_EXAM_TIMEOUT = 120000;
 
 const GEMINI_DISCOVERY_SCHEMA = {
   type: "object",
@@ -790,13 +793,14 @@ function geminiTimetableFilePart(file) {
 async function geminiTimetableRequest(
     parts,
     schema,
-    model = GEMINI_TIMETABLE_MODEL
+    model = GEMINI_TIMETABLE_MODEL,
+    generationConfigOverride = null
 ) {
     const controller = new AbortController();
 
     const timer = setTimeout(
         () => controller.abort(),
-        GEMINI_TIMETABLE_TIMEOUT
+        model === GEMINI_EXAM_MODEL || model === GEMINI_EXAM_FALLBACK ? GEMINI_EXAM_TIMEOUT : GEMINI_TIMETABLE_TIMEOUT
     );
 
     try {
@@ -1429,110 +1433,101 @@ const GEMINI_EXAM_FILTER_SCHEMA = {
 
 function geminiExamFilterPrompt() {
   return `
-Inspect the ENTIRE uploaded college-wide exam datesheet and identify the academic filters that are actually printed anywhere in the document.
-Return ONLY JSON in this shape: {"semesters":[],"courses":[],"branches":[]}
+You are reading a college-wide examination datesheet. Inspect the ENTIRE PDF/image, page by page.
+Your only task here is to identify the exact academic labels printed in the document so the student can choose their profile.
+Return ONLY JSON: {"semesters":[],"courses":[],"branches":[]}
 
-Rules:
-- semesters: find semester labels such as 1st Semester, 2nd Semester, Sem 1, Sem 2, I Sem, II Sem, odd/even semester, or equivalent printed labels.
-- courses: find degree/program names such as B.Tech, M.Tech, MBA, BCA, etc.
-- branches: find branch/specialization names such as CSE, ECE, IT, ME, AI/ML, Artificial Intelligence and Machine Learning, etc.
-- Scan all pages and all section headings; do not stop after the first page.
-- Return each distinct printed value only once.
-- Preserve the wording used in the document where possible.
-- Do not return academic years like 2025-26 as semesters.
-- Do not invent options. If a category is not separated in the document, return an empty array.
+IMPORTANT:
+- Read table headings, merged cells, row labels, footers and continuation pages.
+- A semester may be written as I Sem, II Sem, 1st Sem, Semester-I, etc. Preserve the printed wording.
+- A course may be B.Tech, BCA, MBA, etc. Preserve the printed wording.
+- A branch may be CSE, AI&ML, Artificial Intelligence and Machine Learning, etc. Preserve the printed wording.
+- Do not treat an academic session such as 2025-26 as a semester.
+- Do not invent labels that are not printed.
+- If the document has no separate value for a category, return an empty array for that category.
+- Return every distinct label found across ALL pages, not only the first page.
 `;
 }
 
 async function discoverGeminiExamFilters(file) {
   const filePart = await geminiTimetableFilePart(file);
+  const cfg = {
+    responseMimeType: "application/json",
+    responseSchema: GEMINI_EXAM_FILTER_SCHEMA,
+    maxOutputTokens: 8000,
+    thinkingConfig: { thinkingLevel: "high" }
+  };
   try {
-    return await geminiTimetableRequest(
-      [filePart, { text: geminiExamFilterPrompt() }],
-      GEMINI_EXAM_FILTER_SCHEMA
-    );
+    return await geminiTimetableRequest([filePart, { text: geminiExamFilterPrompt() }], GEMINI_EXAM_FILTER_SCHEMA, GEMINI_EXAM_MODEL, cfg);
   } catch (e) {
     if (/404|not found|model/i.test(e.message || "")) {
-      return await geminiTimetableRequest(
-        [filePart, { text: geminiExamFilterPrompt() }],
-        GEMINI_EXAM_FILTER_SCHEMA,
-        GEMINI_TIMETABLE_FALLBACK
-      );
+      return await geminiTimetableRequest([filePart, { text: geminiExamFilterPrompt() }], GEMINI_EXAM_FILTER_SCHEMA, GEMINI_EXAM_FALLBACK, {
+        ...cfg,
+        thinkingConfig: { thinkingLevel: "high" }
+      });
     }
     throw e;
   }
 }
 
 function geminiExamPrompt(filters = {}) {
-  const today = todayStr();
   const currentYear = new Date().getFullYear();
   return `
-You are an expert college examination-datesheet reader. Treat the uploaded PDF/image as the ONLY source of truth.
+You are an expert examination-datesheet transcriber. The uploaded PDF/image is the ONLY source of truth.
+This is a HIGH ACCURACY task. Do not guess, autocomplete, or use outside knowledge.
 
-STUDENT PROFILE TO EXTRACT:
+STUDENT PROFILE:
 Semester: ${filters.semester || "ALL"}
 Course: ${filters.course || "ALL"}
 Branch: ${filters.branch || "ALL"}
 
-IMPORTANT: This is a college-wide datesheet. It can contain many academic blocks on the same page. You MUST first understand the document structure, then extract the complete exam table belonging to the selected profile. Do not rely on OCR order alone. Track the heading/subheading, semester, course, branch, column headers and any merged cells that govern each row.
+YOUR JOB:
+Read the COMPLETE document, not a cropped region and not just the first page. First understand the table structure, then transcribe EVERY exam row that belongs to the selected profile.
 
-EXTRACTION METHOD:
-1. Inspect EVERY page of the uploaded document before deciding the result.
-2. Locate every section/table/heading that applies to the selected semester, course and branch.
-3. Read every exam row in those sections, including rows that continue onto another page.
-4. Include common/universal papers when they explicitly apply to the selected profile.
-5. Do NOT take exams from a neighboring semester, course or branch just because they are visually close.
-6. If a heading applies to multiple rows, carry that heading's academic context to every row until the next heading changes it.
-7. Preserve the printed subject/paper name and paper code.
-8. Never invent missing values.
+CRITICAL TABLE RULES:
+1. Read every page from beginning to end.
+2. Track merged cells and section headings vertically and horizontally. A heading can govern many rows until another heading replaces it.
+3. Track column headers independently from row labels. Never shift a date, time, subject, or branch from an adjacent row.
+4. When a page continues a table from the previous page, carry forward the previous table's academic context and column headers.
+5. Include common/universal papers ONLY when the document explicitly shows that they apply to the selected profile.
+6. Exclude every row belonging to another semester, course, or branch.
+7. Preserve the printed subject/paper title and paper code exactly as closely as possible.
+8. If a value is genuinely unreadable, return an empty string. Never invent it.
+9. Return ALL matching exams, including the last row on every page.
+10. Before finalizing, silently cross-check each returned exam against the document: correct academic block + correct subject + correct date + correct time.
 
-RETURN ONLY this JSON shape:
-{
-  "exams": [
-    {
-      "subject": "printed subject/paper name",
-      "date": "YYYY-MM-DD",
-      "time": "HH:MM",
-      "room": "printed room/center or empty string",
-      "notes": "paper code and other useful printed details",
-      "semester": "governing semester",
-      "course": "governing course",
-      "branch": "governing branch"
-    }
-  ]
-}
+ACADEMIC FILTERING:
+- The selected semester/course/branch are filters, not hints.
+- Match common abbreviations and equivalent printed forms (for example CSE vs Computer Science and Engineering) only when the document itself establishes that equivalence.
+- If the selected branch is absent from a row because the row inherits a branch heading above it, carry that heading down.
+- If the selected profile has common papers plus branch-specific papers, include both only when the document assigns them to that profile.
 
-DATE/TIME RULES:
-- Convert printed dates to YYYY-MM-DD.
-- If the year is omitted, use ${currentYear}; if the printed month has clearly already passed this year, use ${currentYear + 1}. Today is ${today}.
-- Convert printed times to 24-hour HH:MM.
-- If a single time applies to a block, repeat it for every exam row in that block.
-- Keep date and time from the SAME row/block; never shift a date or time from an adjacent row.
+DATE/TIME:
+- Copy the printed date exactly first, then normalize it to YYYY-MM-DD.
+- If no year is printed, use ${currentYear} only after checking the datesheet's own academic/session context.
+- Copy the time from the SAME row/block. Normalize to 24-hour HH:MM.
+- Do not invent a room if none is printed.
 
-ACADEMIC CONTEXT RULES:
-- Every returned exam MUST have semester/course/branch metadata.
-- If the document does not explicitly print one of those values for a selected profile, use the selected value rather than leaving it blank.
-- For common papers, use the selected profile metadata.
-- Do not return exams that clearly belong to another selected academic profile.
-- Return ALL matching exams, not just the first page or first few rows.
-- If there are no matching exams, return {"exams":[]}.
+OUTPUT ONLY this JSON:
+{"exams":[{"subject":"...","date":"YYYY-MM-DD","time":"HH:MM","room":"","notes":"paper code / printed details","semester":"...","course":"...","branch":"..."}]}
+
+Every returned object MUST be a real exam row from the uploaded document. If there are no matching rows, return {"exams":[]}.
 `;
 }
 
 async function extractGeminiExams(file, filters = {}) {
   const filePart = await geminiTimetableFilePart(file);
+  const cfg = {
+    responseMimeType: "application/json",
+    responseSchema: GEMINI_EXAM_SCHEMA,
+    maxOutputTokens: 50000,
+    thinkingConfig: { thinkingLevel: "high" }
+  };
   try {
-    return await geminiTimetableRequest(
-      [filePart, { text: geminiExamPrompt(filters) }],
-      GEMINI_EXAM_SCHEMA
-    );
+    return await geminiTimetableRequest([filePart, { text: geminiExamPrompt(filters) }], GEMINI_EXAM_SCHEMA, GEMINI_EXAM_MODEL, cfg);
   } catch (e) {
     if (/404|not found|model/i.test(e.message || "")) {
-      return await geminiTimetableRequest(
-        [filePart, { text: geminiExamPrompt(filters) }],
-        GEMINI_EXAM_SCHEMA,
-        GEMINI_TIMETABLE_FALLBACK
-      );
+      return await geminiTimetableRequest([filePart, { text: geminiExamPrompt(filters) }], GEMINI_EXAM_SCHEMA, GEMINI_EXAM_FALLBACK, cfg);
     }
     throw e;
   }

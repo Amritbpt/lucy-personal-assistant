@@ -626,8 +626,8 @@ function App() {
 
         <div className="flex-1 overflow-y-auto p-4 md:p-8">
           {tab === "chat" && (
-            <div className="max-w-2xl mx-auto flex flex-col h-full">
-              <div className="flex-1 flex flex-col gap-3 pb-4">
+            <div className="max-w-2xl mx-auto flex flex-col h-full min-h-0">
+              <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-3 pb-4">
                 {messages.map((m) => (
                   <div key={m.id} className={`flex ${m.sender === "user" ? "justify-end" : "justify-start"}`}>
                     <div
@@ -642,12 +642,6 @@ function App() {
                 <div ref={chatEndRef} />
               </div>
               <div className="flex gap-2 flex-wrap mb-2">
-                <button
-                  onClick={() => setTab("timetable")}
-                  className="text-xs px-3 py-1.5 rounded-full bg-amber-400 text-slate-900 font-semibold hover:bg-amber-300"
-                >
-                  📅 Add timetable
-                </button>
                 {["Current class", "Time left", "Next class", "Today's classes", "Homework", "Exams"].map((q) => (
                   <button
                     key={q}
@@ -658,7 +652,7 @@ function App() {
                   </button>
                 ))}
               </div>
-              <div className="flex gap-2 sticky bottom-0 bg-stone-50 pt-2">
+              <div className="flex gap-2 bg-stone-50 pt-2">
                 <input
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
@@ -1473,48 +1467,55 @@ function geminiExamPrompt(filters = {}) {
   const today = todayStr();
   const currentYear = new Date().getFullYear();
   return `
-You are reading a college-wide exam datesheet. The document may contain many semesters, courses and branches.
+You are an expert college examination-datesheet reader. Treat the uploaded PDF/image as the ONLY source of truth.
 
-STUDENT SELECTION:
-- Semester: ${filters.semester || "ALL"}
-- Course: ${filters.course || "ALL"}
-- Branch: ${filters.branch || "ALL"}
+STUDENT PROFILE TO EXTRACT:
+Semester: ${filters.semester || "ALL"}
+Course: ${filters.course || "ALL"}
+Branch: ${filters.branch || "ALL"}
 
-Your job is to scan the ENTIRE uploaded PDF/image and return ONLY exams that belong to the selected combination.
-Do not use position alone to decide ownership. Read the heading, column, row, section, course and branch labels that govern each exam.
-If an exam is common to all students in the selected combination, include it.
-If an exam belongs to another semester/course/branch, exclude it.
+IMPORTANT: This is a college-wide datesheet. It can contain many academic blocks on the same page. You MUST first understand the document structure, then extract the complete exam table belonging to the selected profile. Do not rely on OCR order alone. Track the heading/subheading, semester, course, branch, column headers and any merged cells that govern each row.
 
-Return JSON only in exactly this shape:
+EXTRACTION METHOD:
+1. Inspect EVERY page of the uploaded document before deciding the result.
+2. Locate every section/table/heading that applies to the selected semester, course and branch.
+3. Read every exam row in those sections, including rows that continue onto another page.
+4. Include common/universal papers when they explicitly apply to the selected profile.
+5. Do NOT take exams from a neighboring semester, course or branch just because they are visually close.
+6. If a heading applies to multiple rows, carry that heading's academic context to every row until the next heading changes it.
+7. Preserve the printed subject/paper name and paper code.
+8. Never invent missing values.
+
+RETURN ONLY this JSON shape:
 {
   "exams": [
     {
-      "subject": "",
+      "subject": "printed subject/paper name",
       "date": "YYYY-MM-DD",
       "time": "HH:MM",
-      "room": "",
-      "notes": "",
-      "semester": "",
-      "course": "",
-      "branch": ""
+      "room": "printed room/center or empty string",
+      "notes": "paper code and other useful printed details",
+      "semester": "governing semester",
+      "course": "governing course",
+      "branch": "governing branch"
     }
   ]
 }
 
-Rules:
-- Scan every page, every table and every relevant heading. Never stop after the first few exams.
-- For EVERY returned exam, copy the semester/course/branch that governs that exam into the metadata fields.
-- If the selected filter is printed in a heading and applies to multiple rows, apply that heading to each row.
-- If a row is common, use the selected value in the metadata field when appropriate.
-- Do not mix neighboring semester/branch blocks.
-- Use the printed subject/paper name.
-- Convert dates to YYYY-MM-DD. If no year is printed, assume ${currentYear}, unless the month has clearly already passed this year, then use ${currentYear + 1}.
-- Today's date is ${today}.
-- Convert exam times to 24-hour HH:MM. If unreadable, use an empty string.
-- Keep room/center separate from notes.
-- Put paper code and other useful printed details in notes.
-- Never invent an exam.
-- If no matching exams exist, return {"exams":[]}.
+DATE/TIME RULES:
+- Convert printed dates to YYYY-MM-DD.
+- If the year is omitted, use ${currentYear}; if the printed month has clearly already passed this year, use ${currentYear + 1}. Today is ${today}.
+- Convert printed times to 24-hour HH:MM.
+- If a single time applies to a block, repeat it for every exam row in that block.
+- Keep date and time from the SAME row/block; never shift a date or time from an adjacent row.
+
+ACADEMIC CONTEXT RULES:
+- Every returned exam MUST have semester/course/branch metadata.
+- If the document does not explicitly print one of those values for a selected profile, use the selected value rather than leaving it blank.
+- For common papers, use the selected profile metadata.
+- Do not return exams that clearly belong to another selected academic profile.
+- Return ALL matching exams, not just the first page or first few rows.
+- If there are no matching exams, return {"exams":[]}.
 `;
 }
 
@@ -1613,11 +1614,17 @@ function ExamsTab({ exams, setExams }) {
           id: genId(), include: true,
           subject: String(r.subject || "").trim(),
           date: /^\d{4}-\d{2}-\d{2}$/.test(String(r.date || "")) ? String(r.date) : "",
-          time: geminiNormalizeTime(r.time), room: String(r.room || "").trim(), notes: String(r.notes || "").trim(),
-          semester: String(r.semester || "").trim(), course: String(r.course || "").trim(), branch: String(r.branch || "").trim()
+          time: geminiNormalizeTime(r.time),
+          room: String(r.room || "").trim(),
+          notes: String(r.notes || "").trim(),
+          // Gemini is told which profile to extract. If it omits inherited
+          // heading metadata, keep the user's selected profile instead of
+          // deleting an otherwise valid exam during a second client-side filter.
+          semester: String(r.semester || filters.semester || "").trim(),
+          course: String(r.course || filters.course || "").trim(),
+          branch: String(r.branch || filters.branch || "").trim()
         }))
-        .filter((r) => r.subject)
-        .filter((r) => matches(r.semester, selectedSemester) && matches(r.course, selectedCourse) && matches(r.branch, selectedBranch));
+        .filter((r) => r.subject);
 
       if (!cleaned.length) setScanError("Gemini couldn't find exams for that semester/course/branch. Check your selections and try again.");
       else { setPreview(cleaned); setFilterChoices(null); }

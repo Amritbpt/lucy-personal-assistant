@@ -1067,7 +1067,7 @@ async function geminiTimetableRequest(
 
         if (e?.name === "AbortError") {
             throw new Error(
-                "Gemini did not finish the datesheet extraction within the 60-second limit. The extraction engine is now using the stronger reasoning configuration. For very large multi-semester PDFs, upload the original PDF or a smaller semester/branch-specific file."
+                "Gemini did not finish the single full-datesheet scan within 60 seconds. Try the original PDF or a smaller semester/branch-specific file."
             );
         }
 
@@ -1584,6 +1584,134 @@ function HomeworkTab({ homework, setHomework, subjects }) {
   );
 }
 
+
+// One-pass datesheet schema.
+// The PDF is scanned ONCE: Gemini returns both the academic filters and all
+// exam rows. Lucy then filters the returned rows locally after the user chooses
+// semester/course/branch. This avoids two expensive full-PDF Gemini calls.
+const GEMINI_DATESHEET_SCHEMA = {
+  type: "object",
+  properties: {
+    semesters: { type: "array", items: { type: "string" } },
+    courses: { type: "array", items: { type: "string" } },
+    branches: { type: "array", items: { type: "string" } },
+    exams: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          subject: { type: "string" },
+          date: { type: "string" },
+          time: { type: "string" },
+          room: { type: "string" },
+          notes: { type: "string" },
+          semester: { type: "string" },
+          course: { type: "string" },
+          branch: { type: "string" }
+        },
+        required: ["subject", "date", "time", "room", "notes", "semester", "course", "branch"]
+      }
+    }
+  },
+  required: ["semesters", "courses", "branches", "exams"]
+};
+
+function geminiDatesheetOnePassPrompt() {
+  const currentYear = new Date().getFullYear();
+  return `
+You are an expert college examination-datesheet extraction engine.
+The uploaded PDF/image is the ONLY source of truth.
+
+GOAL:
+Scan the ENTIRE document ONCE and return:
+1) every distinct academic Semester label,
+2) every distinct Course label,
+3) every distinct Branch label,
+4) every exam row that can be reliably read.
+
+This output will later be filtered locally by the student. Therefore DO NOT choose
+a student profile yourself and DO NOT omit exam rows just because they belong to
+another semester/course/branch. Extract the complete college-wide exam dataset.
+
+ACCURACY IS MORE IMPORTANT THAN SPEED, but you must complete the scan within one
+API request. Use strong visual/table reasoning.
+
+DOCUMENT READING:
+- Read every page, not only the first page.
+- Understand the full table before transcribing rows.
+- Build an internal page/table map: page -> table title -> semester -> course -> branch -> headers.
+- Track merged headings and inherited labels until a new heading replaces them.
+- Track date/time columns independently from subject/paper-code columns.
+- For matrix tables, read the exact row/column intersection.
+- Treat continuation pages as continuation of the preceding table when the structure shows that.
+- Do not shift a date/time/room/subject from an adjacent row.
+- Preserve paper codes and printed subject names in notes/subject when visible.
+- Include common/universal papers when the document explicitly assigns them.
+- Return every distinct exam row, including rows at the bottom of pages.
+- Do not invent unreadable values. Use "" for an unreadable field.
+- If a row is genuinely not an exam row, do not include it.
+
+ACADEMIC LABELS:
+- Preserve the exact printed wording where possible.
+- A semester may be I Sem, II Sem, 1st Sem, Semester-I, etc.
+- A course may be B.Tech, BCA, MBA, etc.
+- A branch may be CSE, AI&ML, Artificial Intelligence and Machine Learning, etc.
+- Do not treat an academic session such as 2025-26 as a semester.
+- Do not invent labels.
+- Return labels from ALL pages, not just the first page.
+
+DATE/TIME:
+- Read the date from the SAME exam row/block as the subject.
+- Normalize a confidently read date to YYYY-MM-DD.
+- If the year is not printed, infer it only from the datesheet's own session/context.
+- Read time from the SAME row/block and normalize to HH:MM.
+- Do not invent rooms.
+
+VERIFICATION:
+Before final JSON, perform a second mental cross-check of every returned row:
+page/table context + semester + course + branch + paper code + subject + date + time.
+A missing field is preferable to a wrong field.
+
+OUTPUT ONLY THIS JSON:
+{
+  "semesters": ["..."],
+  "courses": ["..."],
+  "branches": ["..."],
+  "exams": [
+    {
+      "subject": "...",
+      "date": "YYYY-MM-DD",
+      "time": "HH:MM",
+      "room": "",
+      "notes": "paper code / printed details",
+      "semester": "...",
+      "course": "...",
+      "branch": "..."
+    }
+  ]
+}
+
+Return every real exam row found in the uploaded document.
+`;
+}
+
+async function extractGeminiDatesheetOnePass(file) {
+  const filePart = await geminiTimetableFilePart(file);
+  const cfg = {
+    responseMimeType: "application/json",
+    responseSchema: GEMINI_DATESHEET_SCHEMA,
+    maxOutputTokens: 24000,
+    thinkingConfig: { thinkingLevel: "high" }
+  };
+
+  return await geminiTimetableRequest(
+    [filePart, { text: geminiDatesheetOnePassPrompt() }],
+    GEMINI_DATESHEET_SCHEMA,
+    GEMINI_EXAM_MODEL,
+    cfg
+  );
+}
+
 const GEMINI_EXAM_SCHEMA = {
   type: "object",
   properties: {
@@ -1637,7 +1765,7 @@ IMPORTANT:
 `;
 }
 
-async function discoverGeminiExamFilters(file) {
+async function legacyDiscoverGeminiExamFilters(file) {
   const filePart = await geminiTimetableFilePart(file);
   const cfg = {
     responseMimeType: "application/json",
@@ -1714,7 +1842,7 @@ Every returned object MUST be a real exam row from the uploaded document. If the
 `;
 }
 
-async function extractGeminiExams(file, filters = {}) {
+async function legacyExtractGeminiExams(file, filters = {}) {
   const filePart = await geminiTimetableFilePart(file);
   const cfg = {
     responseMimeType: "application/json",
@@ -1763,67 +1891,114 @@ function ExamsTab({ exams, setExams }) {
     setFilterChoices(null);
 
     try {
-      setScanning(true);
-      const choices = await discoverGeminiExamFilters(file);
-      const semesters = Array.isArray(choices?.semesters) ? choices.semesters.map(String).filter(Boolean) : [];
-      const courses = Array.isArray(choices?.courses) ? choices.courses.map(String).filter(Boolean) : [];
-      const branches = Array.isArray(choices?.branches) ? choices.branches.map(String).filter(Boolean) : [];
+      // IMPORTANT: one Gemini call only.
+      // The previous version used one full-PDF call to discover filters and a
+      // second full-PDF call to extract exams. That doubled latency and made the
+      // 60-second browser timeout much easier to hit.
+      const data = await extractGeminiDatesheetOnePass(file);
 
-      setFilterChoices({ file, semesters, courses, branches });
+      const semesters = Array.isArray(data?.semesters)
+        ? data.semesters.map(String).map((x) => x.trim()).filter(Boolean)
+        : [];
+      const courses = Array.isArray(data?.courses)
+        ? data.courses.map(String).map((x) => x.trim()).filter(Boolean)
+        : [];
+      const branches = Array.isArray(data?.branches)
+        ? data.branches.map(String).map((x) => x.trim()).filter(Boolean)
+        : [];
+
+      const allExams = Array.isArray(data?.exams) ? data.exams : [];
+
+      if (!semesters.length && !courses.length && !branches.length && !allExams.length) {
+        throw new Error("Gemini finished the scan but could not find readable academic sections or exam rows.");
+      }
+
+      setFilterChoices({
+        file,
+        semesters,
+        courses,
+        branches,
+        allExams
+      });
+
       setFilters({
         semester: semesters.length === 1 ? semesters[0] : "",
         course: courses.length === 1 ? courses[0] : "",
         branch: branches.length === 1 ? branches[0] : ""
       });
     } catch (err) {
-      setScanError(err?.message || "Could not identify the semester/course/branch in that datesheet.");
+      setScanError(err?.message || "Could not read this datesheet. Please try the original PDF.");
     } finally {
       setScanning(false);
     }
   }
 
   async function readFilteredDatesheet() {
-    if (!filterChoices?.file) return;
-    if ((filterChoices.semesters.length > 0 && !filters.semester) || (filterChoices.courses.length > 0 && !filters.course) || (filterChoices.branches.length > 0 && !filters.branch)) {
+    if (!filterChoices) return;
+
+    if (
+      (filterChoices.semesters.length > 0 && !filters.semester) ||
+      (filterChoices.courses.length > 0 && !filters.course) ||
+      (filterChoices.branches.length > 0 && !filters.branch)
+    ) {
       setScanError("Please select your semester, course and branch before reading the datesheet.");
       return;
     }
 
     setScanning(true);
     setScanError(null);
+
     try {
-      const rows = await extractGeminiExams(filterChoices.file, filters);
-      const normalizeLabel = (v) => String(v || "").toLowerCase().replace(/[–—-]/g, " ").replace(/[^a-z0-9]+/g, " ").trim();
+      const normalizeLabel = (v) =>
+        String(v || "")
+          .toLowerCase()
+          .replace(/[–—-]/g, " ")
+          .replace(/[^a-z0-9]+/g, " ")
+          .trim();
+
       const selectedSemester = normalizeLabel(filters.semester);
       const selectedCourse = normalizeLabel(filters.course);
       const selectedBranch = normalizeLabel(filters.branch);
+
       const matches = (actual, selected) => {
         if (!selected) return true;
         const a = normalizeLabel(actual);
+        if (!a) return false;
         return a === selected || a.includes(selected) || selected.includes(a);
       };
 
-      const cleaned = (rows?.exams || [])
+      // No Gemini call here. The complete document was already extracted in
+      // handleImageFile(), so this operation is instant.
+      const cleaned = (filterChoices.allExams || [])
+        .filter((r) =>
+          matches(r.semester, selectedSemester) &&
+          matches(r.course, selectedCourse) &&
+          matches(r.branch, selectedBranch)
+        )
         .map((r) => ({
-          id: genId(), include: true,
+          id: genId(),
+          include: true,
           subject: String(r.subject || "").trim(),
           date: /^\d{4}-\d{2}-\d{2}$/.test(String(r.date || "")) ? String(r.date) : "",
           time: geminiNormalizeTime(r.time),
           room: String(r.room || "").trim(),
           notes: String(r.notes || "").trim(),
-          // Gemini is told which profile to extract. If it omits inherited
-          // heading metadata, keep the user's selected profile instead of
-          // deleting an otherwise valid exam during a second client-side filter.
           semester: String(r.semester || filters.semester || "").trim(),
           course: String(r.course || filters.course || "").trim(),
           branch: String(r.branch || filters.branch || "").trim()
         }))
-        .filter((r) => r.subject);
+        .filter((r) => r.subject && r.date);
 
-      if (!cleaned.length) setScanError("Gemini couldn't find exams for that semester/course/branch. Check your selections and try again.");
-      else { setPreview(cleaned); setFilterChoices(null); }
+      if (!cleaned.length) {
+        setScanError(
+          "No matching exams were found for that semester/course/branch. Check the profile selection or verify the datesheet headings."
+        );
+      } else {
+        setPreview(cleaned);
+        setFilterChoices(null);
+      }
     } catch (err) {
-      setScanError(err?.message || "Something went wrong reading that datesheet. Try again.");
+      setScanError(err?.message || "Something went wrong filtering the extracted datesheet.");
     } finally {
       setScanning(false);
     }
@@ -1850,18 +2025,18 @@ function ExamsTab({ exams, setExams }) {
         <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
           <div>
             <h3 className="font-display font-bold text-slate-900">🤖 Gemini datesheet importer</h3>
-            <p className="text-xs text-slate-500 mt-1">Lucy first identifies the academic filters, then imports only the exams for your selection.</p>
+            <p className="text-xs text-slate-500 mt-1">Gemini scans the complete datesheet once. Lucy then lets you choose your semester, course and branch.</p>
           </div>
           <button onClick={() => imageInputRef.current?.click()} disabled={scanning} className="flex items-center gap-2 bg-amber-400 text-slate-900 font-semibold rounded-lg px-4 py-2 text-sm hover:bg-amber-300 disabled:opacity-60">
             {scanning ? <Loader2 size={15} /> : <Upload size={15} />}
-            {scanning ? "Reading…" : "📄 Upload datesheet"}
+            {scanning ? "Gemini is scanning…" : "📄 Upload datesheet"}
           </button>
           <input ref={imageInputRef} type="file" accept=".pdf,.jpg,.jpeg,.png,.webp,application/pdf,image/jpeg,image/png,image/webp" onChange={handleImageFile} className="hidden" />
         </div>
 
         {filterChoices && (
           <div className="border-t border-slate-200 pt-4 space-y-3">
-            <p className="text-sm font-semibold text-slate-900">Tell Lucy which student profile is yours</p>
+            <p className="text-sm font-semibold text-slate-900">Choose your student profile</p>
             {[["semester", "Semester", filterChoices.semesters], ["course", "Course", filterChoices.courses], ["branch", "Branch", filterChoices.branches]].map(([key, label, options]) => (
               <div key={key}>
                 <label className="text-xs text-slate-500">{label}</label>
@@ -1872,7 +2047,7 @@ function ExamsTab({ exams, setExams }) {
               </div>
             ))}
             <div className="flex gap-2">
-              <button onClick={readFilteredDatesheet} disabled={scanning} className="px-4 py-2 rounded-lg bg-slate-900 text-white text-sm font-semibold disabled:opacity-50">{scanning ? "Gemini is carefully reading…" : "Read my exams"}</button>
+              <button onClick={readFilteredDatesheet} disabled={scanning} className="px-4 py-2 rounded-lg bg-slate-900 text-white text-sm font-semibold disabled:opacity-50">{scanning ? "Scanning…" : "Read my exams"}</button>
               <button onClick={() => setFilterChoices(null)} className="px-4 py-2 rounded-lg border border-slate-300 text-sm">Cancel</button>
             </div>
           </div>

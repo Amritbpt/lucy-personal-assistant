@@ -1015,7 +1015,8 @@ async function geminiTimetableRequest(
                         maxOutputTokens: 24000,
                         thinkingConfig: {
                             thinkingLevel: "minimal"
-                        }
+                        },
+                        ...(generationConfigOverride || {})
                     }
                 }),
 
@@ -1066,7 +1067,7 @@ async function geminiTimetableRequest(
 
         if (e?.name === "AbortError") {
             throw new Error(
-                "Gemini took longer than 60 seconds. Try a smaller/original PDF, or split a very large college datesheet into smaller files."
+                "Gemini did not finish the datesheet extraction within the 60-second limit. The extraction engine is now using the stronger reasoning configuration. For very large multi-semester PDFs, upload the original PDF or a smaller semester/branch-specific file."
             );
         }
 
@@ -1619,8 +1620,9 @@ const GEMINI_EXAM_FILTER_SCHEMA = {
 
 function geminiExamFilterPrompt() {
   return `
-You are reading a college-wide examination datesheet. Inspect the ENTIRE PDF/image, page by page.
-Your only task here is to identify the exact academic labels printed in the document so the student can choose their profile.
+You are a fast academic-structure detector for a college-wide examination datesheet.
+Inspect the ENTIRE PDF/image and identify the exact academic labels printed in the document.
+Do not transcribe exam rows in this first pass.
 Return ONLY JSON: {"semesters":[],"courses":[],"branches":[]}
 
 IMPORTANT:
@@ -1641,8 +1643,7 @@ async function discoverGeminiExamFilters(file) {
     responseMimeType: "application/json",
     responseSchema: GEMINI_EXAM_FILTER_SCHEMA,
     maxOutputTokens: 12000,
-    temperature: 0,
-    thinkingConfig: { thinkingLevel: "high" }
+    thinkingConfig: { thinkingLevel: "medium" }
   };
   try {
     return await geminiTimetableRequest([filePart, { text: geminiExamFilterPrompt() }], GEMINI_EXAM_FILTER_SCHEMA, GEMINI_EXAM_MODEL, cfg);
@@ -1672,9 +1673,10 @@ YOUR JOB:
 Read the COMPLETE document, not a cropped region and not just the first page. First understand the table structure, then transcribe EVERY exam row that belongs to the selected profile.
 
 CRITICAL TABLE RULES:
-1. Read every page from beginning to end.
-2. Track merged cells and section headings vertically and horizontally. A heading can govern many rows until another heading replaces it.
-3. Track column headers independently from row labels. Never shift a date, time, subject, or branch from an adjacent row.
+1. Read every page from beginning to end before producing JSON.
+2. Build a page/table map first: page -> table title -> semester -> course -> branch -> column headers.
+3. Track merged cells and section headings vertically and horizontally. A heading can govern many rows until another heading replaces it.
+4. Track column headers independently from row labels. Never shift a date, time, subject, or branch from an adjacent row.
 4. When a page continues a table from the previous page, carry forward the previous table's academic context and column headers.
 5. Include common/universal papers ONLY when the document explicitly shows that they apply to the selected profile.
 6. Exclude every row belonging to another semester, course, or branch.
@@ -1689,6 +1691,9 @@ CRITICAL TABLE RULES:
 15. Preserve paper codes because they are an important cross-check for the correct exam.
 16. If two rows look similar, keep both when both are visibly present; never collapse rows merely because the subject names are similar.
 17. If the selected profile cannot be established confidently for a row, OMIT that row rather than guessing.
+18. Before writing the final JSON, perform a second pass over every matching row and verify: page, inherited heading, paper code, subject, date, time.
+19. Prefer a missing field over a wrong field. A wrong exam is worse than an omitted exam.
+20. Never copy an exam from a neighboring semester/branch just because the subject name is similar.
 
 ACADEMIC FILTERING:
 - The selected semester/course/branch are filters, not hints.
@@ -1714,7 +1719,7 @@ async function extractGeminiExams(file, filters = {}) {
   const cfg = {
     responseMimeType: "application/json",
     responseSchema: GEMINI_EXAM_SCHEMA,
-    maxOutputTokens: 50000,
+    maxOutputTokens: 32000,
     thinkingConfig: { thinkingLevel: "high" }
   };
   try {
@@ -1867,7 +1872,7 @@ function ExamsTab({ exams, setExams }) {
               </div>
             ))}
             <div className="flex gap-2">
-              <button onClick={readFilteredDatesheet} disabled={scanning} className="px-4 py-2 rounded-lg bg-slate-900 text-white text-sm font-semibold disabled:opacity-50">{scanning ? "Reading exams…" : "Read my exams"}</button>
+              <button onClick={readFilteredDatesheet} disabled={scanning} className="px-4 py-2 rounded-lg bg-slate-900 text-white text-sm font-semibold disabled:opacity-50">{scanning ? "Gemini is carefully reading…" : "Read my exams"}</button>
               <button onClick={() => setFilterChoices(null)} className="px-4 py-2 rounded-lg border border-slate-300 text-sm">Cancel</button>
             </div>
           </div>

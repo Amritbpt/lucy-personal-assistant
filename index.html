@@ -88,6 +88,47 @@ function formatDateReadable(d) {
 function todayName() {
   return DAYS[new Date().getDay()];
 }
+
+function examForDate(exams, dateStr) {
+  return (exams || [])
+    .filter((e) => String(e.date || "") === dateStr && e.subject)
+    .sort((a, b) => (timeToMinutes(a.time) ?? 9999) - (timeToMinutes(b.time) ?? 9999));
+}
+
+function getPrioritySchedule(timetable, exams, now) {
+  const dayName = DAYS[now.getDay()];
+  const today = now.toISOString().slice(0, 10);
+  const todayExams = examForDate(exams, today);
+
+  // EXAMS HAVE PRIORITY ON AN EXAM DAY.
+  // If there is an exam today, Lucy does not promote a class over it.
+  if (todayExams.length) {
+    const nowMinutes = now.getHours() * 60 + now.getMinutes();
+    const currentExam = todayExams.find((e) => {
+      const start = timeToMinutes(e.time);
+      return start !== null && start <= nowMinutes && nowMinutes < start + 180;
+    });
+    if (currentExam) {
+      return { type: "exam", entry: currentExam, daysAway: 0, todayExams };
+    }
+
+    const nextExam = todayExams.find((e) => {
+      const start = timeToMinutes(e.time);
+      return start !== null && start >= nowMinutes;
+    });
+    if (nextExam) {
+      return { type: "exam", entry: nextExam, daysAway: 0, todayExams };
+    }
+
+    // Exam day is still treated as exam-priority even after the last exam.
+    return { type: "exam-day", entry: todayExams[0], daysAway: 0, todayExams };
+  }
+
+  // No exam today: use the normal class schedule.
+  const nextClass = getNextClass(timetable, now);
+  return nextClass ? { type: "class", ...nextClass, todayExams: [] } : null;
+}
+
 function getNextClass(timetable, now) {
   const nowMinutes = now.getHours() * 60 + now.getMinutes();
   const todayIdx = now.getDay();
@@ -325,6 +366,61 @@ function App() {
     return () => clearInterval(id);
   }, []);
 
+  // Notifications: exams always win over classes on the same date.
+  // This browser notification layer works while Lucy is running.
+  useEffect(() => {
+    if (!loaded) return;
+
+    const timer = setInterval(() => {
+      try {
+        if (!("Notification" in window)) return;
+        if (Notification.permission !== "granted") return;
+
+        const now = new Date();
+        const date = now.toISOString().slice(0, 10);
+        const nowMinutes = now.getHours() * 60 + now.getMinutes();
+        const key = `lucy-notified-${date}-${now.getHours()}-${now.getMinutes()}`;
+
+        if (localStorage.getItem(key)) return;
+
+        const todaysExams = examForDate(exams, date);
+        const examTwoMin = todaysExams.find((e) => {
+          const start = timeToMinutes(e.time);
+          return start !== null && start - nowMinutes === 2;
+        });
+
+        // EXAM PRIORITY: if an exam is due in 2 minutes, notify only about it.
+        if (examTwoMin) {
+          new Notification("🔴 Exam starting in 2 minutes", {
+            body: `${examTwoMin.subject} starts at ${formatTime12(examTwoMin.time)}${examTwoMin.room ? ` · Room ${examTwoMin.room}` : ""}.`,
+            tag: `lucy-exam-${date}-${examTwoMin.time}`
+          });
+          localStorage.setItem(key, "exam");
+          return;
+        }
+
+        // If there is any exam today, do not send class-start notifications.
+        if (todaysExams.length) return;
+
+        const todaysClasses = timetable.filter((e) => e.day === DAYS[now.getDay()] && e.start);
+        const classTwoMin = todaysClasses.find((e) => {
+          const start = timeToMinutes(e.start);
+          return start !== null && start - nowMinutes === 2;
+        });
+
+        if (classTwoMin) {
+          new Notification("🔔 Class starting in 2 minutes", {
+            body: `${classTwoMin.subject} starts at ${formatTime12(classTwoMin.start)}${classTwoMin.room ? ` · Room ${classTwoMin.room}` : ""}.`,
+            tag: `lucy-class-${date}-${classTwoMin.start}`
+          });
+          localStorage.setItem(key, "class");
+        }
+      } catch (_) {}
+    }, 15000);
+
+    return () => clearInterval(timer);
+  }, [loaded, timetable, exams]);
+
   // scroll chat to bottom
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -336,6 +432,37 @@ function App() {
   function getLiveClassInfo(now = new Date()) {
     const dayName = DAYS[now.getDay()];
     const nowMinutes = now.getHours() * 60 + now.getMinutes();
+    const today = now.toISOString().slice(0, 10);
+    const todayExams = examForDate(exams, today);
+
+    // EXAM PRIORITY: on any exam day, show the exam instead of a class.
+    if (todayExams.length) {
+      const currentExam = todayExams.find((e) => {
+        const start = timeToMinutes(e.time);
+        return start !== null && start <= nowMinutes && nowMinutes < start + 180;
+      });
+
+      if (currentExam) {
+        return { type: "exam", entry: currentExam, remaining: 0, until: 0, todayExams };
+      }
+
+      const nextExam = todayExams.find((e) => {
+        const start = timeToMinutes(e.time);
+        return start !== null && start > nowMinutes;
+      });
+
+      if (nextExam) {
+        return {
+          type: "exam-next",
+          entry: nextExam,
+          until: Math.max(0, timeToMinutes(nextExam.time) - nowMinutes),
+          todayExams
+        };
+      }
+
+      return { type: "exam-done", entry: todayExams[todayExams.length - 1], remaining: 0, until: 0, todayExams };
+    }
+
     const todayEntries = timetable
       .filter((e) => e.day === dayName && e.start && e.end)
       .sort((a, b) => timeToMinutes(a.start) - timeToMinutes(b.start));
@@ -362,8 +489,20 @@ function App() {
   }
 
   function nextClassSummary() {
-    const next = getNextClass(timetable, new Date());
+    const priority = getPrioritySchedule(timetable, exams, new Date());
+
+    if (priority?.type === "exam" || priority?.type === "exam-next") {
+      const e = priority.entry;
+      return `Exam priority: ${e.subject} starts at ${formatTime12(e.time)}${e.room ? ` in ${e.room}` : ""}. Classes are not promoted over exams on an exam day.`;
+    }
+
+    if (priority?.type === "exam-day") {
+      return `Today is an exam day. Your exam priority is ${priority.entry.subject} at ${formatTime12(priority.entry.time)}.`;
+    }
+
+    const next = priority?.type === "class" ? priority : getNextClass(timetable, new Date());
     if (!next) return "You don't have any classes on your timetable yet. Add some in the Timetable tab.";
+
     const { entry, daysAway } = next;
     if (daysAway === 0) {
       const mins = timeToMinutes(entry.start) - (new Date().getHours() * 60 + new Date().getMinutes());
@@ -467,7 +606,7 @@ function App() {
     e.target.value = "";
   }
 
-  const nextClassInfo = loaded ? getNextClass(timetable, new Date()) : null;
+  const nextClassInfo = loaded ? getPrioritySchedule(timetable, exams, new Date()) : null;
 
   return (
     <div style={{ fontFamily: "'Inter', ui-sans-serif, system-ui" }} className="min-h-screen w-full bg-stone-50 text-slate-800">
@@ -546,6 +685,19 @@ function App() {
             </p>
 
             <div className="mt-4 pt-4 border-t border-slate-200">
+              <p className="text-xs text-slate-500 font-semibold">Class & exam notifications</p>
+              <p className="text-xs text-slate-400 mt-1">Exams always take priority over class notifications on the same day.</p>
+              <button
+                onClick={() => {
+                  if ("Notification" in window) Notification.requestPermission();
+                }}
+                className="mt-2 px-3 py-1.5 rounded-md bg-slate-900 text-white text-xs font-semibold"
+              >
+                Enable notifications
+              </button>
+            </div>
+
+            <div className="mt-4 pt-4 border-t border-slate-200">
               <p className="text-xs text-slate-500 font-semibold">Gemini timetable importer</p>
               <p className="text-xs text-slate-400 mt-2">
                 Gemini is connected through Lucy's secure server-side proxy. You do not need to enter or store a Gemini API key in this browser.
@@ -573,11 +725,21 @@ function App() {
           <span className="text-xs uppercase tracking-wider text-slate-400 shrink-0">Next up</span>
           {nextClassInfo ? (
             <span className="font-mono-c text-sm truncate">
-              <span className="text-amber-300 font-semibold">{nextClassInfo.entry.subject}</span>
-              {"  "}· Room {nextClassInfo.entry.room || "TBA"} · {nextClassInfo.entry.teacher || "—"} ·{" "}
-              {nextClassInfo.daysAway === 0
-                ? `today ${formatTime12(nextClassInfo.entry.start)}`
-                : `${nextClassInfo.entry.day} ${formatTime12(nextClassInfo.entry.start)}`}
+              {nextClassInfo.type === "exam" || nextClassInfo.type === "exam-next" || nextClassInfo.type === "exam-day" ? (
+                <>
+                  <span className="text-rose-300 font-semibold">EXAM PRIORITY · {nextClassInfo.entry.subject}</span>
+                  {"  "}· {formatTime12(nextClassInfo.entry.time)}
+                  {nextClassInfo.entry.room ? ` · Room ${nextClassInfo.entry.room}` : ""}
+                </>
+              ) : (
+                <>
+                  <span className="text-amber-300 font-semibold">{nextClassInfo.entry.subject}</span>
+                  {"  "}· Room {nextClassInfo.entry.room || "TBA"} · {nextClassInfo.entry.teacher || "—"} ·{" "}
+                  {nextClassInfo.daysAway === 0
+                    ? `today ${formatTime12(nextClassInfo.entry.start)}`
+                    : `${nextClassInfo.entry.day} ${formatTime12(nextClassInfo.entry.start)}`}
+                </>
+              )}
             </span>
           ) : (
             <span className="text-sm text-slate-400">No classes scheduled yet — add your timetable below.</span>
@@ -586,14 +748,28 @@ function App() {
 
         {loaded && (() => {
           const live = getLiveClassInfo(new Date());
-          if (live.type !== "current" && live.type !== "next") return null;
+          if (!["current", "next", "exam", "exam-next"].includes(live.type)) return null;
           const pct = live.type === "current"
             ? Math.min(100, Math.max(0, ((timeToMinutes(live.entry.end) - (new Date().getHours() * 60 + new Date().getMinutes())) / Math.max(1, timeToMinutes(live.entry.end) - timeToMinutes(live.entry.start))) * 100))
             : 0;
           return (
             <div className="px-4 md:px-8 pt-4 bg-stone-50">
               <div className="max-w-4xl mx-auto rounded-2xl border border-slate-200 bg-white shadow-sm p-4 md:p-5">
-                {live.type === "current" ? (
+                {live.type === "exam" || live.type === "exam-next" ? (
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-[11px] uppercase tracking-wider font-bold text-rose-600">🔴 Exam priority</p>
+                      <h2 className="font-display font-bold text-lg text-slate-900 mt-1">{live.entry.subject}</h2>
+                      <p className="text-xs text-slate-500 mt-1">
+                        Exam at {formatTime12(live.entry.time)}
+                        {live.entry.room ? ` · Room ${live.entry.room}` : ""}
+                      </p>
+                      <p className="text-xs text-rose-600 mt-1 font-semibold">
+                        {live.type === "exam" ? "Exam is active — classes are deprioritized today." : `Starts in ${live.until} min.`}
+                      </p>
+                    </div>
+                  </div>
+                ) : live.type === "current" ? (
                   <div>
                     <div className="flex items-center justify-between gap-3">
                       <div>
@@ -722,7 +898,7 @@ const GEMINI_TIMETABLE_FALLBACK = "gemini-3.6-flash";
 const GEMINI_TIMETABLE_TIMEOUT = 75000;
 const GEMINI_EXAM_MODEL = "gemini-3.7-flash";
 const GEMINI_EXAM_FALLBACK = "gemini-3.6-flash";
-const GEMINI_EXAM_TIMEOUT = 120000;
+const GEMINI_EXAM_TIMEOUT = 60000;
 
 const GEMINI_DISCOVERY_SCHEMA = {
   type: "object",
@@ -810,7 +986,7 @@ async function geminiTimetableRequest(
 
     const timer = setTimeout(
         () => controller.abort(),
-        model === GEMINI_EXAM_MODEL || model === GEMINI_EXAM_FALLBACK ? GEMINI_EXAM_TIMEOUT : GEMINI_TIMETABLE_TIMEOUT
+        String(model || "").includes("3.7") || String(model || "").includes("3.6") ? GEMINI_EXAM_TIMEOUT : GEMINI_TIMETABLE_TIMEOUT
     );
 
     try {
@@ -890,7 +1066,7 @@ async function geminiTimetableRequest(
 
         if (e?.name === "AbortError") {
             throw new Error(
-                "Gemini took longer than 75 seconds. Try the original PDF or a smaller clear timetable."
+                "Gemini took longer than 60 seconds. Try a smaller/original PDF, or split a very large college datesheet into smaller files."
             );
         }
 
@@ -1464,7 +1640,8 @@ async function discoverGeminiExamFilters(file) {
   const cfg = {
     responseMimeType: "application/json",
     responseSchema: GEMINI_EXAM_FILTER_SCHEMA,
-    maxOutputTokens: 8000,
+    maxOutputTokens: 12000,
+    temperature: 0,
     thinkingConfig: { thinkingLevel: "high" }
   };
   try {
@@ -1484,7 +1661,7 @@ function geminiExamPrompt(filters = {}) {
   const currentYear = new Date().getFullYear();
   return `
 You are an expert examination-datesheet transcriber. The uploaded PDF/image is the ONLY source of truth.
-This is a HIGH ACCURACY task. Do not guess, autocomplete, or use outside knowledge.
+This is a HIGH ACCURACY task. Use deliberate visual/table reasoning. Do not guess, autocomplete, or use outside knowledge.
 
 STUDENT PROFILE:
 Semester: ${filters.semester || "ALL"}
@@ -1504,7 +1681,14 @@ CRITICAL TABLE RULES:
 7. Preserve the printed subject/paper title and paper code exactly as closely as possible.
 8. If a value is genuinely unreadable, return an empty string. Never invent it.
 9. Return ALL matching exams, including the last row on every page.
-10. Before finalizing, silently cross-check each returned exam against the document: correct academic block + correct subject + correct date + correct time.
+10. Before finalizing, silently cross-check EACH returned exam against the source page/table: correct academic block + correct subject/paper code + correct date + correct time.
+11. Do not stop after finding a few matches. Continue scanning every page until the complete selected profile has been covered.
+12. When the datesheet is a matrix, first map the column headers and row labels, then read the intersection cell; never read a nearby date/time merely because it is visually close.
+13. When semester/course/branch appears once as a merged heading, carry that context forward only until the next explicit heading changes it.
+14. Treat continuation pages as part of the same table when their headings/columns indicate continuation.
+15. Preserve paper codes because they are an important cross-check for the correct exam.
+16. If two rows look similar, keep both when both are visibly present; never collapse rows merely because the subject names are similar.
+17. If the selected profile cannot be established confidently for a row, OMIT that row rather than guessing.
 
 ACADEMIC FILTERING:
 - The selected semester/course/branch are filters, not hints.

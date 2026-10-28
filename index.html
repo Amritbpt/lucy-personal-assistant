@@ -869,11 +869,11 @@ function SectionHeader({ icon: Icon, title, subtitle }) {
 }
 
 
-const GEMINI_TIMETABLE_MODEL = "gemini-3.5-flash-lite";
-const GEMINI_TIMETABLE_FALLBACK = "gemini-3.6-flash";
+const GEMINI_TIMETABLE_MODEL = "gemini-3.8-flash";
+const GEMINI_TIMETABLE_FALLBACK = "gemini-3.8-flash";
 const GEMINI_TIMETABLE_TIMEOUT = 75000;
-const GEMINI_EXAM_MODEL = "gemini-3.7-flash";
-const GEMINI_EXAM_FALLBACK = "gemini-3.6-flash";
+const GEMINI_EXAM_MODEL = "gemini-3.8-flash";
+const GEMINI_EXAM_FALLBACK = "gemini-3.8-flash";
 const GEMINI_EXAM_TIMEOUT = 60000;
 
 const GEMINI_DISCOVERY_SCHEMA = {
@@ -2136,7 +2136,7 @@ function NotesStudyTab({ notes, setNotes, weakTopics, setWeakTopics }) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "gemini-2.5-flash",
+        model: "gemini-3.8-flash",
         contents: [{ role: "user", parts: [{ text: prompt }] }],
         generationConfig: { temperature: 0.3, maxOutputTokens: 5000 }
       })

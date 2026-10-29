@@ -2176,7 +2176,7 @@ function NotesStudyTab({ notes, setNotes, weakTopics, setWeakTopics }) {
   async function callGeminiParts(parts, maxOutputTokens = 1800) {
     // Text and file parts both go through Lucy's existing secure Worker.
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 90000);
+    const timeoutId = setTimeout(() => controller.abort(), 105000);
     try {
       const response = await fetch("https://lucy-gemini-api.amritranabpt.workers.dev/", {
         method: "POST",
@@ -2202,7 +2202,7 @@ function NotesStudyTab({ notes, setNotes, weakTopics, setWeakTopics }) {
       if (!text.trim()) throw new Error("Gemini returned an empty answer. Please try again.");
       return text.trim();
     } catch (error) {
-      if (error?.name === "AbortError") throw new Error("Lucy timed out waiting for Gemini after 90 seconds. Try a smaller PDF or a clearer image.");
+      if (error?.name === "AbortError") {   throw new Error(     "Gemini OCR took too long. Try a smaller PDF (1–5 pages) or upload a clear image of one page at a time."   ); } {   throw new Error(     "Gemini OCR took too long. Try a smaller PDF (1–5 pages) or upload a clear image of one page at a time."   ); } throw new Error("Lucy timed out waiting for Gemini after 90 seconds. Try a smaller PDF or a clearer image.");
       if (error instanceof TypeError) throw new Error("Could not reach Lucy's Gemini Worker. Check the Worker URL and CORS settings.");
       throw error;
     } finally {

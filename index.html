@@ -2201,15 +2201,25 @@ function NotesStudyTab({ notes, setNotes, weakTopics, setWeakTopics }) {
       const text = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("") || "";
       if (!text.trim()) throw new Error("Gemini returned an empty answer. Please try again.");
       return text.trim();
-    } catch (error) {
-      if (error?.name === "AbortError") {   throw new Error(     "Gemini OCR took too long. Try a smaller PDF (1–5 pages) or upload a clear image of one page at a time."   ); } {   throw new Error(     "Gemini OCR took too long. Try a smaller PDF (1–5 pages) or upload a clear image of one page at a time."   ); } throw new Error("Lucy timed out waiting for Gemini after 90 seconds. Try a smaller PDF or a clearer image.");
-      if (error instanceof TypeError) throw new Error("Could not reach Lucy's Gemini Worker. Check the Worker URL and CORS settings.");
+    } 
+       catch (error) {
+      if (error?.name === "AbortError") {
+        throw new Error(
+          "Gemini request timed out. Try a smaller document or try again."
+        );
+      }
+
+      if (error instanceof TypeError) {
+        throw new Error(
+          "Could not connect to Lucy's Gemini Worker. Check your internet connection and Worker settings."
+        );
+      }
+
       throw error;
     } finally {
       clearTimeout(timeoutId);
     }
   }
-
   async function callGemini(prompt) {
     return callGeminiParts([{ text: prompt }], 1800);
   }
